@@ -1,7 +1,10 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 
 #include "Fixture.h"
+#include "Luau/ConstraintGraph.h"
 #include "doctest.h"
+
+LUAU_FASTFLAG(LuauCopyDependenciesOnce)
 
 using namespace Luau;
 
@@ -71,6 +74,35 @@ TEST_CASE_FIXTURE(Fixture, "table_prop_access_diamond")
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(Fixture, "copying_dependencies_again_picks_up_ones_the_source_gained")
+{
+    ScopedFastFlag sff{FFlag::LuauCopyDependenciesOnce, true};
+
+    TypeArena arena;
+    Scope scope{getBuiltins()->anyTypePack};
+    ConstraintGraph graph{getBuiltins()};
+
+    TypeId source = arena.freshType(getBuiltins(), &scope);
+    TypeId target = arena.freshType(getBuiltins(), &scope);
+    const Constraint first{NotNull{&scope}, Location{}, EqualityConstraint{source, target}};
+    const Constraint second{NotNull{&scope}, Location{}, EqualityConstraint{source, target}};
+
+    graph.addDependencyOf(&first, source);
+    graph.copyDependenciesOf(source, target);
+
+    // A new dependency of `source` has to reach `target` ...
+    graph.addDependencyOf(&second, source);
+    graph.copyDependenciesOf(source, target);
+    graph.unblockConstraint(NotNull{&first});
+    CHECK(graph.hasUnsolvedDependencies(target));
+
+    // ... and so does one that was removed and then added back.
+    graph.addDependencyOf(&first, source);
+    graph.copyDependenciesOf(source, target);
+    graph.unblockConstraint(NotNull{&second});
+    CHECK(graph.hasUnsolvedDependencies(target));
 }
 
 TEST_SUITE_END();
