@@ -27,6 +27,7 @@ LUAU_FASTINTVARIABLE(DebugLuauTypeFunctionRuntimeHeapLimit, 0)
 
 LUAU_DYNAMIC_FASTINT(LuauTypeFunctionSerdeIterationLimit)
 LUAU_FASTFLAG(LuauIntegerType2)
+LUAU_FASTFLAG(LuauTypeFunctionLazyExternMembers)
 
 LUAU_FASTFLAGVARIABLE(LuauTypeFunctionSupportsFrozen)
 LUAU_FASTFLAGVARIABLE(LuauTypeFunctionStructuredErrors)
@@ -1489,6 +1490,29 @@ static int getFunctionGenerics(lua_State* L)
     return 1;
 }
 
+// An extern type's members are serialized the first time a type function reads them.
+static const TypeFunctionExternType* getExternType(lua_State* L, TypeFunctionTypeId ty)
+{
+    const TypeFunctionExternType* tfct = get<TypeFunctionExternType>(ty);
+    if (!FFlag::LuauTypeFunctionLazyExternMembers || !tfct || !tfct->membersPending)
+        return tfct;
+
+    TypeFunctionRuntimeBuilderState* runtimeBuilder = getTypeFunctionRuntime(L)->runtimeBuilder;
+    if (serializeExternMembers(ty, runtimeBuilder))
+        return tfct;
+
+    std::string error = "Complexity limit reached when serializing the members of an extern type";
+    if (FFlag::LuauTypeFunctionStructuredErrors && !runtimeBuilder->errors.empty())
+        error = toString(runtimeBuilder->errors.front());
+    else if (!FFlag::LuauTypeFunctionStructuredErrors && !runtimeBuilder->errors_DEPRECATED.empty())
+        error = runtimeBuilder->errors_DEPRECATED.front();
+
+    // The type function sees this as a Lua error it can catch, so the serializer's error must not linger.
+    runtimeBuilder->errors.clear();
+    runtimeBuilder->errors_DEPRECATED.clear();
+    luaL_error(L, "%s", error.c_str());
+}
+
 // Luau: `self:readparent() -> type`
 // Returns the read type of the class' parent
 static int getReadParent(lua_State* L)
@@ -1498,7 +1522,7 @@ static int getReadParent(lua_State* L)
         luaL_error(L, "type.parent: expected 1 arguments, but got %d", argumentCount);
 
     TypeFunctionTypeId self = getTypeUserData(L, 1);
-    auto tfct = get<TypeFunctionExternType>(self);
+    auto tfct = getExternType(L, self);
     if (!tfct)
         luaL_error(L, "type.parent: expected self to be a class, but got %s instead", getTag(L, self).c_str());
 
@@ -1520,7 +1544,7 @@ static int getWriteParent(lua_State* L)
         luaL_error(L, "type.parent: expected 1 arguments, but got %d", argumentCount);
 
     TypeFunctionTypeId self = getTypeUserData(L, 1);
-    auto tfct = get<TypeFunctionExternType>(self);
+    auto tfct = getExternType(L, self);
     if (!tfct)
         luaL_error(L, "type.parent: expected self to be a class, but got %s instead", getTag(L, self).c_str());
 
@@ -1604,7 +1628,7 @@ static int getProps(lua_State* L)
         return 1;
     }
 
-    if (auto tfct = get<TypeFunctionExternType>(self))
+    if (auto tfct = getExternType(L, self))
     {
         lua_createtable(L, int(tfct->props.size()), 0);
         for (auto& [name, prop] : tfct->props)
@@ -1667,7 +1691,7 @@ static int getIndexer(lua_State* L)
         return 1;
     }
 
-    if (auto tfct = get<TypeFunctionExternType>(self))
+    if (auto tfct = getExternType(L, self))
     {
         // if the indexer does not exist, we should return nil
         if (!tfct->indexer.has_value())
@@ -1715,7 +1739,7 @@ static int getReadIndexer(lua_State* L)
         return 1;
     }
 
-    if (auto tfct = get<TypeFunctionExternType>(self))
+    if (auto tfct = getExternType(L, self))
     {
         // if the indexer does not exist, we should return nil
         if (!tfct->indexer.has_value())
@@ -1761,7 +1785,7 @@ static int getWriteIndexer(lua_State* L)
         return 1;
     }
 
-    if (auto tfct = get<TypeFunctionExternType>(self))
+    if (auto tfct = getExternType(L, self))
     {
         // if the indexer does not exist, we should return nil
         if (!tfct->indexer.has_value())
@@ -1801,7 +1825,7 @@ static int getMetatable(lua_State* L)
         return 1;
     }
 
-    if (auto tfct = get<TypeFunctionExternType>(self))
+    if (auto tfct = getExternType(L, self))
     {
         // if the metatable does not exist, we should return nil
         if (!tfct->metatable.has_value())

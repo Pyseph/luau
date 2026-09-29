@@ -23,6 +23,7 @@ LUAU_FASTFLAG(LuauNewTypePathErrorMessages)
 LUAU_FASTFLAG(LuauUdtfFixTypeNameTypo)
 LUAU_FASTFLAG(LuauClonePublicInterfaceRetainTypeFunctionSolvedStatus)
 LUAU_FASTFLAG(LuauTypeFunctionsReturnAfterAllSerialized)
+LUAU_FASTFLAG(LuauTypeFunctionLazyExternMembers)
 
 TEST_SUITE_BEGIN("UserDefinedTypeFunctionTests");
 
@@ -3853,6 +3854,47 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "error_when_serializing_environment_but_not_a
 
     // TODO: This probably *should* error, as we cannot include `Foobar` as
     // part of the environment as an unserializable type (error).
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(ExternTypeFixture, "extern_type_members_that_cannot_be_serialized_fail_every_read")
+{
+    ScopedFastFlag sffs[] = {{FFlag::DebugLuauForceOldSolver, false}, {FFlag::LuauTypeFunctionLazyExternMembers, true}};
+    // Too few steps to serialize the members of BaseClass
+    ScopedFastInt luauTypeFunctionSerdeIterationLimit{DFInt::LuauTypeFunctionSerdeIterationLimit, 3};
+
+    // Both evaluations read the same serialized alias, so the second must not see what the first left behind.
+    CheckResult result = check(R"(
+        type Base = BaseClass
+        type function methods(arg)
+            return types.newtable(Base:properties())
+        end
+        local function a(idx: methods<number>) end
+        local function b(idx: methods<string>) end
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(4, result);
+    for (const TypeError& error : result.errors)
+        CHECK_EQ(
+            toString(error),
+            "'methods' type function errored at runtime: [string \"methods\"]:4: Complexity limit reached when serializing the members of an "
+            "extern type"
+        );
+}
+
+TEST_CASE_FIXTURE(ExternTypeFixture, "extern_type_members_that_are_never_read_are_not_serialized")
+{
+    ScopedFastFlag sffs[] = {{FFlag::DebugLuauForceOldSolver, false}, {FFlag::LuauTypeFunctionLazyExternMembers, true}};
+    // Too few steps to serialize the members of BaseClass
+    ScopedFastInt luauTypeFunctionSerdeIterationLimit{DFInt::LuauTypeFunctionSerdeIterationLimit, 3};
+
+    CheckResult result = check(R"(
+        type function pass(arg)
+            return arg
+        end
+        local function ok(idx: pass<BaseClass>): BaseClass return idx end
+    )");
+
     LUAU_REQUIRE_NO_ERRORS(result);
 }
 

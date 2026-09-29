@@ -22,6 +22,7 @@ LUAU_DYNAMIC_FASTINTVARIABLE(LuauTypeFunctionSerdeIterationLimit, 100'000);
 
 LUAU_FASTFLAG(LuauTypeFunctionStructuredErrors)
 LUAU_FASTFLAG(LuauTypeFunctionSerializeArgNames)
+LUAU_FASTFLAGVARIABLE(LuauTypeFunctionLazyExternMembers)
 
 namespace Luau
 {
@@ -79,6 +80,28 @@ public:
             return nullptr;
 
         return find(tp).value_or(nullptr);
+    }
+
+    bool serializeExternMembers(TypeFunctionTypeId ty)
+    {
+        LUAU_ASSERT(FFlag::LuauTypeFunctionLazyExternMembers);
+
+        TypeFunctionExternType* c2 = getMutable<TypeFunctionExternType>(ty);
+        LUAU_ASSERT(c2 && c2->membersPending);
+
+        const ExternType* c1 = get<ExternType>(c2->externTy);
+        LUAU_ASSERT(c1);
+
+        // Serialized into a copy, so that a failure leaves the members pending rather than half-serialized.
+        TypeFunctionExternType members{{}, std::nullopt, std::nullopt, std::nullopt, std::nullopt, c2->externTy};
+        serializeMembers(c1, &members);
+        run();
+
+        if (hasExceededIterationLimit() || hasErrors())
+            return false;
+
+        *c2 = std::move(members);
+        return true;
     }
 
 private:
@@ -460,6 +483,15 @@ private:
     }
 
     void serializeChildren(const ExternType* c1, TypeFunctionExternType* c2)
+    {
+        // Serializing the members would serialize every type they mention, and few type functions read them.
+        if (FFlag::LuauTypeFunctionLazyExternMembers)
+            c2->membersPending = true;
+        else
+            serializeMembers(c1, c2);
+    }
+
+    void serializeMembers(const ExternType* c1, TypeFunctionExternType* c2)
     {
         for (const auto& [k, p] : c1->props)
         {
@@ -1115,6 +1147,11 @@ TypeFunctionTypeId serialize(TypeId ty, TypeFunctionRuntimeBuilderState* state)
 TypeFunctionTypePackId serialize(TypePackId tp, TypeFunctionRuntimeBuilderState* state)
 {
     return TypeFunctionSerializer(state).serialize(tp);
+}
+
+bool serializeExternMembers(TypeFunctionTypeId ty, TypeFunctionRuntimeBuilderState* state)
+{
+    return TypeFunctionSerializer(state).serializeExternMembers(ty);
 }
 
 TypeId deserialize(TypeFunctionTypeId ty, TypeFunctionRuntimeBuilderState* state)
