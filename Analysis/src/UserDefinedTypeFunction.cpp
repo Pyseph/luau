@@ -2,7 +2,9 @@
 
 #include "Luau/ApplyTypeFunction.h"
 #include "Luau/ConstraintSolver.h"
+#include "Luau/HashUtil.h"
 #include "Luau/IterativeTypeFunctionTypeVisitor.h"
+#include "Luau/Module.h"
 #include "Luau/Normalize.h"
 #include "Luau/StringUtils.h"
 #include "Luau/TimeTrace.h"
@@ -17,6 +19,7 @@ LUAU_FASTFLAG(LuauTypeFunctionSupportsFrozen)
 LUAU_FASTFLAG(LuauTypeFunctionStructuredErrors)
 LUAU_FASTFLAGVARIABLE(LuauTypeFunctionsReturnAfterAllSerialized)
 LUAU_FASTFLAGVARIABLE(LuauCacheUserTypeFunctionResults)
+LUAU_FASTFLAGVARIABLE(LuauShareUserTypeFunctionResults)
 
 namespace Luau
 {
@@ -76,7 +79,93 @@ std::optional<UserDefinedTypeFunctionCall> getReusableCall(
     return call;
 }
 
+// The evaluation of [typeFunction] on these arguments, if every module that evaluates it can reuse its result: the
+// arguments must last as long as the module defining the function does, and the aliases the function can read must not
+// be types this check can still change.
+std::optional<UserDefinedTypeFunctionResults::Call> getSharedCall(
+    const TypeFunctionInstanceType& typeFunction,
+    const Module& owner,
+    const std::vector<TypeId>& typeParams,
+    const std::vector<TypePackId>& packParams,
+    NotNull<TypeFunctionContext> ctx
+)
+{
+    LUAU_ASSERT(FFlag::LuauShareUserTypeFunctionResults);
+
+    // Without frozen aliases, an evaluation can leave state behind for the next one.
+    if (!owner.typeFunctionResults || !FFlag::LuauTypeFunctionSupportsFrozen || !packParams.empty())
+        return std::nullopt;
+
+    for (const auto& [_, alias] : typeFunction.userFuncData.environmentAlias)
+    {
+        TypeId ty = follow(alias.first->type);
+        if (!ty->persistent && (!ty->owningArena || ty->owningArena == ctx->arena.get()))
+            return std::nullopt;
+    }
+
+    UserDefinedTypeFunctionResults::Call call{typeFunction.userFuncData.definition, {}};
+    call.arguments.reserve(typeParams.size());
+
+    for (TypeId typeParam : typeParams)
+    {
+        TypeId ty = follow(typeParam);
+
+        // Other modules can be freed while these results are kept, and a new type could then take the place of theirs.
+        if (!ty->persistent && ty->owningArena != &owner.interfaceTypes)
+            return std::nullopt;
+
+        call.arguments.push_back(ty);
+    }
+
+    return call;
+}
+
+// Keeps the result for every module that evaluates the same call, unless one was kept already, and returns the kept one.
+// The result is deserialized again into the arena of the shared results, so that it lives as long as they do.
+TypeId shareResult(
+    UserDefinedTypeFunctionResults& shared,
+    UserDefinedTypeFunctionResults::Call call,
+    TypeFunctionTypeId result,
+    TypeId localResult,
+    NotNull<TypeFunctionContext> ctx
+)
+{
+    LUAU_ASSERT(FFlag::LuauShareUserTypeFunctionResults);
+
+    std::lock_guard<std::mutex> lock(shared.mutex);
+
+    if (TypeId* kept = shared.results.find(call))
+        return *kept;
+
+    TypeFunctionContext sharedContext{
+        NotNull{&shared.arena}, ctx->builtins, ctx->scope, ctx->normalizer, ctx->typeFunctionRuntime, ctx->ice, ctx->limits, ctx->subtyping
+    };
+    TypeFunctionRuntimeBuilderState state{NotNull{&sharedContext}};
+    TypeId sharedResult = deserialize(result, &state);
+
+    if (!state.errors.empty() || !state.errors_DEPRECATED.empty())
+        return localResult;
+
+    shared.results[std::move(call)] = sharedResult;
+    return sharedResult;
+}
+
 } // namespace
+
+bool UserDefinedTypeFunctionResults::Call::operator==(const Call& rhs) const
+{
+    return definition == rhs.definition && arguments == rhs.arguments;
+}
+
+size_t UserDefinedTypeFunctionResults::HashCall::operator()(const Call& call) const
+{
+    size_t seed = std::hash<const AstStatTypeFunction*>{}(call.definition);
+
+    for (TypeId argument : call.arguments)
+        hashCombine(seed, std::hash<TypeId>{}(argument));
+
+    return seed;
+}
 
 struct FindUserTypeFunctionBlockers : TypeOnceVisitor
 {
@@ -271,6 +360,30 @@ TypeFunctionReductionResult<TypeId> userDefinedTypeFunction(
         {
             if (TypeId* result = ctx->typeFunctionRuntime->results.find(*reusableCall))
                 return {*result, Reduction::MaybeOk, {}, {}};
+        }
+    }
+
+    std::shared_ptr<UserDefinedTypeFunctionResults> sharedResults;
+    std::optional<UserDefinedTypeFunctionResults::Call> sharedCall;
+    if (FFlag::LuauShareUserTypeFunctionResults)
+    {
+        if (ModulePtr owner = typeFunction->userFuncData.owner.lock())
+        {
+            sharedCall = getSharedCall(*typeFunction, *owner, typeParams, packParams, ctx);
+            if (sharedCall)
+                sharedResults = owner->typeFunctionResults;
+        }
+
+        if (sharedResults)
+        {
+            std::lock_guard<std::mutex> lock(sharedResults->mutex);
+            if (TypeId* result = sharedResults->results.find(*sharedCall))
+            {
+                if (FFlag::LuauCacheUserTypeFunctionResults && reusableCall)
+                    ctx->typeFunctionRuntime->results[*reusableCall] = *result;
+
+                return {*result, Reduction::MaybeOk, {}, {}};
+            }
         }
     }
 
@@ -506,6 +619,11 @@ TypeFunctionReductionResult<TypeId> userDefinedTypeFunction(
         if (!runtimeBuilder->errors.empty())
             return {std::nullopt, Reduction::Erroneous, {}, {}, toString(runtimeBuilder->errors.front()), ctx->typeFunctionRuntime->messages};
 
+        // Printed messages have to be reported by every evaluation, so results that printed are not shared.
+        if (FFlag::LuauShareUserTypeFunctionResults && sharedResults && ctx->typeFunctionRuntime->messages.empty() &&
+            !runtimeBuilder->dependsOnContext)
+            retTypeId = shareResult(*sharedResults, std::move(*sharedCall), retTypeFunctionTypeId, retTypeId, ctx);
+
         // Printed messages have to be reported again by every evaluation, so their results are not reused.
         if (FFlag::LuauCacheUserTypeFunctionResults && reusableCall && ctx->typeFunctionRuntime->messages.empty() &&
             !runtimeBuilder->dependsOnContext)
@@ -523,6 +641,11 @@ TypeFunctionReductionResult<TypeId> userDefinedTypeFunction(
         // At least 1 error occurred while deserializing
         if (runtimeBuilder->errors_DEPRECATED.size() > 0)
             return {std::nullopt, Reduction::Erroneous, {}, {}, runtimeBuilder->errors_DEPRECATED.front(), ctx->typeFunctionRuntime->messages};
+
+        // Printed messages have to be reported by every evaluation, so results that printed are not shared.
+        if (FFlag::LuauShareUserTypeFunctionResults && sharedResults && ctx->typeFunctionRuntime->messages.empty() &&
+            !runtimeBuilder->dependsOnContext)
+            retTypeId = shareResult(*sharedResults, std::move(*sharedCall), retTypeFunctionTypeId, retTypeId, ctx);
 
         // Printed messages have to be reported again by every evaluation, so their results are not reused.
         if (FFlag::LuauCacheUserTypeFunctionResults && reusableCall && ctx->typeFunctionRuntime->messages.empty() &&

@@ -25,6 +25,7 @@ void setLogLuau(LogLuauProc ll);
 void resetLogLuauProc();
 
 struct Module;
+struct UserDefinedTypeFunctionResults;
 
 using ScopePtr = std::shared_ptr<struct Scope>;
 using ModulePtr = std::shared_ptr<Module>;
@@ -138,6 +139,9 @@ struct Module
 
     // Stable references for type aliases registered in the environment
     std::vector<std::unique_ptr<TypeFun>> typeFunctionAliases;
+
+    // Results of the user-defined type functions defined here, reused by every module that evaluates them
+    std::shared_ptr<UserDefinedTypeFunctionResults> typeFunctionResults;
 
     std::unordered_map<Name, TypeId> declaredGlobals;
     ErrorVec errors;
