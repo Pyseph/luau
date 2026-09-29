@@ -18,9 +18,12 @@ template<typename T>
 class TypedAllocator
 {
 public:
-    TypedAllocator()
+    TypedAllocator() = default;
+
+    // For allocators that often hold only a few values: blocks start at a single page and double up to the usual size.
+    explicit TypedAllocator(bool growBlocks)
+        : growBlocks(growBlocks)
     {
-        currentBlockSize = kBlockSize;
     }
 
     TypedAllocator(const TypedAllocator&) = delete;
@@ -41,9 +44,9 @@ public:
     {
         LUAU_ASSERT(!frozen);
 
-        if (currentBlockSize >= kBlockSize)
+        if (currentBlockSize >= currentBlockCapacity)
         {
-            LUAU_ASSERT(currentBlockSize == kBlockSize);
+            LUAU_ASSERT(currentBlockSize == currentBlockCapacity);
             appendBlock();
         }
 
@@ -56,8 +59,8 @@ public:
 
     bool contains(const T* ptr) const
     {
-        for (T* block : stuff)
-            if (ptr >= block && ptr < block + kBlockSize)
+        for (size_t i = 0; i < stuff.size(); ++i)
+            if (ptr >= stuff[i] && ptr < stuff[i] + blockCapacity(i))
                 return true;
 
         return false;
@@ -70,7 +73,7 @@ public:
 
     size_t size() const
     {
-        return stuff.empty() ? 0 : kBlockSize * (stuff.size() - 1) + currentBlockSize;
+        return previousBlocksSize + currentBlockSize;
     }
 
     void clear()
@@ -78,21 +81,19 @@ public:
         if (frozen)
             unfreeze();
         free();
-
-        currentBlockSize = kBlockSize;
     }
 
     void freeze()
     {
-        for (T* block : stuff)
-            pagedFreeze(block, kBlockSizeBytes);
+        for (size_t i = 0; i < stuff.size(); ++i)
+            pagedFreeze(stuff[i], blockSizeBytes(i));
         frozen = true;
     }
 
     void unfreeze()
     {
-        for (T* block : stuff)
-            pagedUnfreeze(block, kBlockSizeBytes);
+        for (size_t i = 0; i < stuff.size(); ++i)
+            pagedUnfreeze(stuff[i], blockSizeBytes(i));
         frozen = false;
     }
 
@@ -106,36 +107,61 @@ private:
     {
         LUAU_ASSERT(!frozen);
 
-        for (T* block : stuff)
+        for (size_t i = 0; i < stuff.size(); ++i)
         {
-            size_t blockSize = (block == stuff.back()) ? currentBlockSize : kBlockSize;
+            size_t blockSize = (i + 1 == stuff.size()) ? currentBlockSize : blockCapacity(i);
 
-            for (size_t i = 0; i < blockSize; ++i)
-                block[i].~T();
+            for (size_t j = 0; j < blockSize; ++j)
+                stuff[i][j].~T();
 
-            pagedDeallocate(block, kBlockSizeBytes);
+            pagedDeallocate(stuff[i], blockSizeBytes(i));
         }
 
         stuff.clear();
         currentBlockSize = 0;
+        currentBlockCapacity = 0;
+        previousBlocksSize = 0;
     }
 
     void appendBlock()
     {
-        void* block = pagedAllocate(kBlockSizeBytes);
+        size_t index = stuff.size();
+        void* block = pagedAllocate(blockSizeBytes(index));
         if (!block)
             throw std::bad_alloc();
 
         stuff.emplace_back(static_cast<T*>(block));
+        previousBlocksSize += currentBlockSize;
         currentBlockSize = 0;
+        currentBlockCapacity = blockCapacity(index);
+    }
+
+    size_t blockSizeBytes(size_t index) const
+    {
+        if (!growBlocks || index >= kGrowingBlocks)
+            return kBlockSizeBytes;
+
+        return kFirstBlockSizeBytes << index;
+    }
+
+    size_t blockCapacity(size_t index) const
+    {
+        return blockSizeBytes(index) / sizeof(T);
     }
 
     bool frozen = false;
+    bool growBlocks = false;
     std::vector<T*> stuff;
     size_t currentBlockSize = 0;
+    size_t currentBlockCapacity = 0;
+    size_t previousBlocksSize = 0;
 
+    static constexpr size_t kFirstBlockSizeBytes = 4096;
     static constexpr size_t kBlockSizeBytes = 32768;
-    static constexpr size_t kBlockSize = kBlockSizeBytes / sizeof(T);
+    static constexpr size_t kGrowingBlocks = 3;
+
+    static_assert((kFirstBlockSizeBytes << kGrowingBlocks) == kBlockSizeBytes);
+    static_assert(sizeof(T) <= kFirstBlockSizeBytes);
 };
 
 } // namespace Luau
