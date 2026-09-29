@@ -24,6 +24,7 @@ LUAU_FASTFLAG(LuauUdtfFixTypeNameTypo)
 LUAU_FASTFLAG(LuauClonePublicInterfaceRetainTypeFunctionSolvedStatus)
 LUAU_FASTFLAG(LuauTypeFunctionsReturnAfterAllSerialized)
 LUAU_FASTFLAG(LuauTypeFunctionLazyExternMembers)
+LUAU_FASTFLAG(LuauCacheUserTypeFunctionResults)
 
 TEST_SUITE_BEGIN("UserDefinedTypeFunctionTests");
 
@@ -3896,6 +3897,64 @@ TEST_CASE_FIXTURE(ExternTypeFixture, "extern_type_members_that_are_never_read_ar
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "results_are_reused_for_arguments_that_cannot_change")
+{
+    DOES_NOT_PASS_OLD_SOLVER_GUARD();
+
+    ScopedFastFlag sff[] = {
+        {FFlag::LuauCacheUserTypeFunctionResults, true},
+        {FFlag::LuauTypeFunctionSupportsFrozen, true},
+    };
+
+    CheckResult result = check(R"(
+        type function Wrap(t)
+            local wrapped = types.newtable()
+            wrapped:setproperty(types.singleton("value"), t)
+            return wrapped
+        end
+
+        local function wrap<T>(value: T): Wrap<T>
+            return { value = value } :: any
+        end
+
+        local a = wrap(1)
+        local b = wrap(2)
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+    CHECK("{ value: number }" == toString(requireType("a")));
+    // Each call instantiates its own `Wrap<number>`; the second evaluation reuses the first result.
+    CHECK(follow(requireType("a")) == follow(requireType("b")));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "results_that_print_are_not_reused")
+{
+    DOES_NOT_PASS_OLD_SOLVER_GUARD();
+
+    ScopedFastFlag sff[] = {
+        {FFlag::LuauCacheUserTypeFunctionResults, true},
+        {FFlag::LuauTypeFunctionSupportsFrozen, true},
+    };
+
+    CheckResult result = check(R"(
+        type function Loud(t)
+            print("evaluated")
+            return t
+        end
+
+        local function loud<T>(value: T): Loud<T>
+            return value :: any
+        end
+
+        local a = loud(1)
+        local b = loud(2)
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(2, result);
+    CHECK(toString(result.errors[0]) == "evaluated");
+    CHECK(toString(result.errors[1]) == "evaluated");
 }
 
 TEST_SUITE_END();
