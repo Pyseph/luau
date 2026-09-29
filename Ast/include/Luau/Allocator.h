@@ -34,12 +34,17 @@ public:
     }
 
 private:
+    // Allocators that round requests up to size classes can serve a page of exactly this size without waste.
+    static constexpr size_t kPageSize = 8192;
+
     struct Page
     {
         Page* next;
 
-        alignas(8) char data[8192];
+        alignas(8) char data[kPageSize - 8];
     };
+
+    static_assert(sizeof(Page) == kPageSize, "Page header and data should add up to exactly kPageSize");
 
     Page* root;
     size_t offset;
