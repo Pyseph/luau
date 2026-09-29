@@ -21,6 +21,7 @@ LUAU_FASTFLAG(LuauNewTypePathErrorMessages)
 LUAU_FASTFLAG(LuauUdtfFixTypeNameTypo)
 LUAU_FASTFLAG(LuauClonePublicInterfaceRetainTypeFunctionSolvedStatus)
 LUAU_FASTFLAG(LuauTypeFunctionsReturnAfterAllSerialized)
+LUAU_FASTFLAG(LuauShareUserTypeFunctionResults)
 LUAU_FASTFLAG(LuauTypeFunctionLazyExternMembers)
 LUAU_FASTFLAG(LuauCacheUserTypeFunctionResults)
 
@@ -3948,6 +3949,138 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "results_that_print_are_not_reused")
     LUAU_REQUIRE_ERROR_COUNT(2, result);
     CHECK(toString(result.errors[0]) == "evaluated");
     CHECK(toString(result.errors[1]) == "evaluated");
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "results_are_shared_between_modules")
+{
+    DOES_NOT_PASS_OLD_SOLVER_GUARD();
+
+    ScopedFastFlag sff[] = {
+        {FFlag::LuauShareUserTypeFunctionResults, true},
+        {FFlag::LuauTypeFunctionSupportsFrozen, true},
+    };
+
+    fileResolver.source["game/A"] = R"(
+        export type function Wrap(t)
+            local wrapped = types.newtable()
+            wrapped:setproperty(types.singleton("value"), t)
+            return wrapped
+        end
+
+        export type Point = { x: number }
+
+        return {}
+    )";
+
+    fileResolver.source["game/B"] = R"(
+        local A = require(game.A)
+        local number: A.Wrap<number> = { value = 1 }
+        local point: A.Wrap<A.Point> = { value = { x = 1 } }
+        return {}
+    )";
+
+    fileResolver.source["game/C"] = R"(
+        local A = require(game.A)
+        local number: A.Wrap<number> = { value = 2 }
+        local point: A.Wrap<A.Point> = { value = { x = 2 } }
+        return {}
+    )";
+
+    LUAU_REQUIRE_NO_ERRORS(getFrontend().check("game/B"));
+    LUAU_REQUIRE_NO_ERRORS(getFrontend().check("game/C"));
+
+    CHECK("{ value: number }" == toString(requireType("game/B", "number")));
+    CHECK("{ value: { x: number } }" == toString(requireType("game/B", "point"), ToStringOptions{true}));
+
+    // `number` is persistent and `A.Point` belongs to A, so C reuses the results B kept in A.
+    CHECK(follow(requireType("game/B", "number")) == follow(requireType("game/C", "number")));
+    CHECK(follow(requireType("game/B", "point")) == follow(requireType("game/C", "point")));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "results_for_types_of_a_third_module_are_not_shared")
+{
+    DOES_NOT_PASS_OLD_SOLVER_GUARD();
+
+    ScopedFastFlag sff[] = {
+        {FFlag::LuauShareUserTypeFunctionResults, true},
+        {FFlag::LuauTypeFunctionSupportsFrozen, true},
+    };
+
+    fileResolver.source["game/A"] = R"(
+        export type function Wrap(t)
+            local wrapped = types.newtable()
+            wrapped:setproperty(types.singleton("value"), t)
+            return wrapped
+        end
+
+        return {}
+    )";
+
+    fileResolver.source["game/D"] = R"(
+        export type Point = { x: number }
+        return {}
+    )";
+
+    fileResolver.source["game/B"] = R"(
+        local A = require(game.A)
+        local D = require(game.D)
+        local point: A.Wrap<D.Point> = { value = { x = 1 } }
+        return {}
+    )";
+
+    fileResolver.source["game/C"] = R"(
+        local A = require(game.A)
+        local D = require(game.D)
+        local point: A.Wrap<D.Point> = { value = { x = 2 } }
+        return {}
+    )";
+
+    LUAU_REQUIRE_NO_ERRORS(getFrontend().check("game/B"));
+    LUAU_REQUIRE_NO_ERRORS(getFrontend().check("game/C"));
+
+    CHECK("{ value: { x: number } }" == toString(requireType("game/C", "point"), ToStringOptions{true}));
+
+    // D can be checked again without A, so A cannot keep results for D's types.
+    CHECK(follow(requireType("game/B", "point")) != follow(requireType("game/C", "point")));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "results_that_print_are_not_shared_between_modules")
+{
+    DOES_NOT_PASS_OLD_SOLVER_GUARD();
+
+    ScopedFastFlag sff[] = {
+        {FFlag::LuauShareUserTypeFunctionResults, true},
+        {FFlag::LuauTypeFunctionSupportsFrozen, true},
+    };
+
+    fileResolver.source["game/A"] = R"(
+        export type function Loud(t)
+            print("evaluated")
+            return t
+        end
+
+        return {}
+    )";
+
+    fileResolver.source["game/B"] = R"(
+        local A = require(game.A)
+        local b: A.Loud<number> = 1
+        return {}
+    )";
+
+    fileResolver.source["game/C"] = R"(
+        local A = require(game.A)
+        local c: A.Loud<number> = 2
+        return {}
+    )";
+
+    CheckResult resultB = getFrontend().check("game/B");
+    LUAU_REQUIRE_ERROR_COUNT(1, resultB);
+    CHECK(toString(resultB.errors[0]) == "evaluated");
+
+    CheckResult resultC = getFrontend().check("game/C");
+    LUAU_REQUIRE_ERROR_COUNT(1, resultC);
+    CHECK(toString(resultC.errors[0]) == "evaluated");
 }
 
 TEST_SUITE_END();

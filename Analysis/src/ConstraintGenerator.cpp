@@ -30,6 +30,7 @@
 #include "Luau/TypeStateMap.h"
 #include "Luau/TypeUtils.h"
 #include "Luau/Unifier2.h"
+#include "Luau/UserDefinedTypeFunction.h"
 #include "Luau/VisitType.h"
 
 #include <memory>
@@ -55,6 +56,7 @@ LUAU_FASTFLAGVARIABLE(LuauThreadGeneralizeThroughConstraintGeneration)
 LUAU_FASTFLAGVARIABLE(LuauExperimentalIfLocalAnalysis)
 LUAU_FASTFLAG(LuauTraverseScopeToFunction)
 LUAU_FASTFLAGVARIABLE(LuauUnconditionallyVisitTypeAliasParams)
+LUAU_FASTFLAG(LuauShareUserTypeFunctionResults)
 
 namespace Luau
 {
@@ -1036,6 +1038,12 @@ void ConstraintGenerator::prototypeTypeDefinitions(const ScopePtr& scope, AstSta
 
             udtfData.owner = module;
             udtfData.definition = function;
+
+            if (FFlag::LuauShareUserTypeFunctionResults && !module->typeFunctionResults)
+            {
+                module->typeFunctionResults = std::make_shared<UserDefinedTypeFunctionResults>();
+                module->typeFunctionResults->arena.owningModule = module.get();
+            }
 
             TypeId typeFunctionTy = arena->addType(
                 TypeFunctionInstanceType{NotNull{&builtinTypes->typeFunctions->userFunc}, std::move(typeParams), {}, function->name, udtfData}
