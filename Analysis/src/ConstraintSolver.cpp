@@ -54,6 +54,7 @@ LUAU_FASTFLAG(LuauIterableConstraintMutatesIterator)
 LUAU_FASTFLAGVARIABLE(LuauTraverseScopeToFunction)
 LUAU_FASTFLAG(LuauReferenceCountInitializerIsIterative)
 LUAU_FASTFLAG(LuauAddressIndependentTypeOrder)
+LUAU_FASTFLAGVARIABLE(LuauGeneralizeModuleBeforeSimplifying)
 
 namespace Luau
 {
@@ -540,7 +541,21 @@ void ConstraintSolver::run()
 
     if (FFlag::LuauCyclicRequireTypeInference && constraintSet.deferredConstraints.size() == 1)
     {
-        unsolvedConstraints.emplace_back(constraintSet.deferredConstraints[0].get());
+        if (FFlag::LuauGeneralizeModuleBeforeSimplifying)
+        {
+            // Constraint generation ends with the SimplifyConstraints for the module's unions, and those holding table
+            // literals wait for the module's generalization to seal them. Queue it ahead of them, or forcing the solver
+            // simplifies those unions one per forced dispatch, while their tables are still unsealed.
+            size_t firstSimplify = unsolvedConstraints.size();
+            while (firstSimplify > 0 && get<SimplifyConstraint>(*unsolvedConstraints[firstSimplify - 1]))
+                --firstSimplify;
+
+            unsolvedConstraints.emplace(unsolvedConstraints.begin() + ptrdiff_t(firstSimplify), constraintSet.deferredConstraints[0].get());
+        }
+        else
+        {
+            unsolvedConstraints.emplace_back(constraintSet.deferredConstraints[0].get());
+        }
     }
 
     auto runSolverPass = [&](bool force)
