@@ -11,6 +11,7 @@ using namespace Luau;
 LUAU_FASTFLAG(DebugLuauForceOldSolver)
 LUAU_FASTFLAG(LuauNewTypePathErrorMessages)
 LUAU_FASTFLAG(LuauIterativeTypeSearcher)
+LUAU_FASTFLAG(LuauAddressIndependentTypeOrder)
 
 TEST_SUITE_BEGIN("UnionTypes");
 
@@ -1165,6 +1166,27 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "oss_2025")
 
         table.insert(foo, bar)
     )"));
+}
+
+TEST_CASE_FIXTURE(Fixture, "property_of_a_union_lists_its_types_in_union_order")
+{
+    ScopedFastFlag sffs[] = {
+        {FFlag::DebugLuauForceOldSolver, false},
+        {FFlag::LuauAddressIndependentTypeOrder, true},
+    };
+
+    // The property types keep the union's order, so `string` comes first; by address, `number` (allocated first) would.
+    CheckResult result = check(R"(
+        type A = { f: number }
+        type B = { f: string }
+
+        local function g(x: B | A)
+            x.f()
+        end
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+    CHECK_EQ("Cannot call a value of type string in union:\n  number | string", toString(result.errors[0]));
 }
 
 TEST_SUITE_END();

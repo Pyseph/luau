@@ -13,6 +13,7 @@ LUAU_FASTFLAG(LuauCheckFunctionStatementTypes)
 LUAU_FASTFLAG(DebugLuauForceOldSolver)
 LUAU_FASTFLAG(LuauNewTypePathErrorMessages)
 LUAU_FASTFLAG(LuauFixNormalizeFunctionIntersections)
+LUAU_FASTFLAG(LuauAddressIndependentTypeOrder)
 
 TEST_SUITE_BEGIN("IntersectionTypes");
 
@@ -1701,6 +1702,37 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "narrow_intersection_nevers")
     )"));
 
     CHECK_EQ("Player & { read Character: ~(false?) }", toString(requireTypeAtPosition({3, 23})));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "narrowed_intersection_part_order_does_not_depend_on_addresses")
+{
+    ScopedFastFlag sffs[] = {
+        {FFlag::DebugLuauForceOldSolver, false},
+        {FFlag::LuauAddressIndependentTypeOrder, true},
+    };
+
+    // `{ string } & ~table` normalizes to never but `~table & { string }` doesn't, so each refinement here only type
+    // checks with its parts in argument order. With eight of them, an order that depends on addresses fails in practice.
+    CheckResult result = check(R"(
+        local function f(a: { string }, b: { string }, c: { string }, d: { string }, e: { string }, g: { string }, h: { string }, i: { string })
+            if typeof(a) ~= "table" then local w: { string } = { a } end
+            if typeof(b) ~= "table" then local w: { string } = { b } end
+            if typeof(c) ~= "table" then local w: { string } = { c } end
+            if typeof(d) ~= "table" then local w: { string } = { d } end
+            if typeof(e) ~= "table" then local w: { string } = { e } end
+            if typeof(g) ~= "table" then local w: { string } = { g } end
+            if typeof(h) ~= "table" then local w: { string } = { h } end
+            if typeof(i) ~= "table" then local w: { string } = { i } end
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+
+    const IntersectionType* refined = get<IntersectionType>(follow(requireTypeAtPosition({2, 65})));
+    REQUIRE(refined);
+    REQUIRE_EQ(2, refined->parts.size());
+    CHECK(get<TableType>(follow(refined->parts[0])));
+    CHECK(get<NegationType>(follow(refined->parts[1])));
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "bounds_propagate_into_free_intersection_bounds")
