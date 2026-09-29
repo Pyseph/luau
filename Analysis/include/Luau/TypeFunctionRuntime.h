@@ -238,6 +238,9 @@ struct TypeFunctionExternType
     std::optional<TypeFunctionTypeId> writeParent;
 
     TypeId externTy;
+
+    // Set when serialization left the members above empty; they are serialized from externTy on first read.
+    bool membersPending = false;
 };
 
 struct TypeFunctionGenericType

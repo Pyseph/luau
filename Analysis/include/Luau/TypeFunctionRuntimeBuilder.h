@@ -36,6 +36,10 @@ struct TypeFunctionRuntimeBuilderState
 TypeFunctionTypeId serialize(TypeId ty, TypeFunctionRuntimeBuilderState* state);
 TypeFunctionTypePackId serialize(TypePackId tp, TypeFunctionRuntimeBuilderState* state);
 
+// Serializes the members of an extern type whose serialization left them pending. False on an error or at the
+// complexity limit.
+bool serializeExternMembers(TypeFunctionTypeId ty, TypeFunctionRuntimeBuilderState* state);
+
 TypeId deserialize(TypeFunctionTypeId ty, TypeFunctionRuntimeBuilderState* state);
 TypePackId deserialize(TypeFunctionTypePackId tp, TypeFunctionRuntimeBuilderState* state);
 
