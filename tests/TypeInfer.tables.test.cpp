@@ -38,6 +38,8 @@ LUAU_FASTFLAG(LuauRelateIndexersTypo)
 LUAU_FASTFLAG(LuauTraverseScopeToFunction)
 LUAU_FASTFLAG(LuauInferReadOnlyIndexers)
 LUAU_FASTFLAG(LuauRelateIdenticalIndexerResults)
+LUAU_FASTFLAG(LuauCyclicRequireTypeInference)
+LUAU_FASTFLAG(LuauGeneralizeModuleBeforeSimplifying)
 
 namespace
 {
@@ -7117,6 +7119,34 @@ TEST_CASE_FIXTURE(Fixture, "basic_data_like_array_with_union_elements")
     )"));
 
     CHECK_EQ("{{number | string} | {number | {number}}}", toString(requireType("t"), {/* exhaustive */ true}));
+}
+
+TEST_CASE_FIXTURE(Fixture, "data_like_array_simplifies_in_a_module_that_forces_constraints")
+{
+    DOES_NOT_PASS_OLD_SOLVER_GUARD();
+
+    ScopedFastFlag sffs[] = {
+        {FFlag::LuauCyclicRequireTypeInference, true},
+        {FFlag::LuauGeneralizeModuleBeforeSimplifying, true},
+    };
+
+    // The concatenation in the loop can only be solved by forcing constraints.
+    LUAU_REQUIRE_NO_ERRORS(check(R"(
+        local t = {
+            {1, 2},
+            {3, 4},
+        }
+
+        local function join(parts: {string}): string
+            local s = ""
+            for _, part in parts do
+                s = s .. part
+            end
+            return s
+        end
+    )"));
+
+    CHECK_EQ("{{number}}", toString(requireType("t"), {/* exhaustive */ true}));
 }
 
 TEST_CASE_FIXTURE(Fixture, "large_data_like_array_can_simplify")
