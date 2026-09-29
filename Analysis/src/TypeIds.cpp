@@ -4,8 +4,16 @@
 #include "Luau/TypePack.h"
 #include "Luau/TypeIds.h"
 
+#include <algorithm>
+
+LUAU_FASTFLAGVARIABLE(LuauTypeIdsSearchSmallSetsLinearly)
+
 namespace Luau
 {
+
+// A set of up to this many types leaves `types` empty and searches `order` instead, which saves allocating a hash map for
+// the many small sets.
+static constexpr size_t kLinearSearchLimit = 8;
 
 TypeIds::TypeIds(std::initializer_list<TypeId> tys)
 {
@@ -16,6 +24,23 @@ TypeIds::TypeIds(std::initializer_list<TypeId> tys)
 void TypeIds::insert(TypeId ty)
 {
     ty = follow(ty);
+
+    if (FFlag::LuauTypeIdsSearchSmallSetsLinearly && types.empty())
+    {
+        if (std::find(order.begin(), order.end(), ty) != order.end())
+            return;
+
+        if (order.size() < kLinearSearchLimit)
+        {
+            order.push_back(ty);
+            hash ^= std::hash<TypeId>{}(ty);
+            return;
+        }
+
+        // This set is outgrowing the linear search, so `types` takes over.
+        for (TypeId existing : order)
+            types[existing] = true;
+    }
 
     // get a reference to the slot for `ty` in `types`
     bool& entry = types[ty];
@@ -81,7 +106,8 @@ TypeIds::const_iterator TypeIds::end() const
 TypeIds::iterator TypeIds::erase(TypeIds::const_iterator it)
 {
     TypeId ty = *it;
-    types[ty] = false;
+    if (!FFlag::LuauTypeIdsSearchSmallSetsLinearly || !types.empty())
+        types[ty] = false;
     hash ^= std::hash<TypeId>{}(ty);
     return order.erase(it);
 }
@@ -108,6 +134,10 @@ bool TypeIds::empty() const
 size_t TypeIds::count(TypeId ty) const
 {
     ty = follow(ty);
+
+    if (FFlag::LuauTypeIdsSearchSmallSetsLinearly && types.empty())
+        return std::find(order.begin(), order.end(), ty) != order.end() ? 1 : 0;
+
     const bool* val = types.find(ty);
     return (val && *val) ? 1 : 0;
 }

@@ -1,6 +1,7 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/Scope.h"
 #include "Luau/Type.h"
+#include "Luau/TypeIds.h"
 #include "Luau/TypeInfer.h"
 #include "Luau/VisitType.h"
 
@@ -8,6 +9,8 @@
 #include "ScopedFlags.h"
 
 #include "doctest.h"
+
+LUAU_FASTFLAG(LuauTypeIdsSearchSmallSetsLinearly)
 
 using namespace Luau;
 
@@ -446,6 +449,36 @@ TEST_CASE("content_reassignment")
     CHECK(!futureAny->persistent);
     CHECK(futureAny->documentationSymbol == "@global/any");
     CHECK(futureAny->owningArena == &arena);
+}
+
+TEST_CASE("type_ids_keep_their_members_past_the_linear_search_limit")
+{
+    ScopedFastFlag sff{FFlag::LuauTypeIdsSearchSmallSetsLinearly, true};
+
+    TypeArena arena;
+    std::vector<TypeId> types;
+    for (int i = 0; i < 20; ++i)
+        types.push_back(arena.addType(BlockedType{}));
+
+    TypeIds small{types[0], types[1], types[2]};
+    small.erase(types[1]);
+    CHECK(small.contains(types[0]));
+    CHECK(!small.contains(types[1]));
+
+    TypeIds ids;
+    ids.insert(types.begin(), types.end());
+    ids.insert(types.begin(), types.end());
+    CHECK(std::vector<TypeId>(ids.begin(), ids.end()) == types);
+
+    TypeIds reversed;
+    reversed.insert(types.rbegin(), types.rend());
+    CHECK(ids == reversed);
+
+    for (size_t i = 0; i < types.size(); i += 3)
+        ids.erase(types[i]);
+
+    for (size_t i = 0; i < types.size(); ++i)
+        CHECK(ids.contains(types[i]) == (i % 3 != 0));
 }
 
 TEST_SUITE_END();
