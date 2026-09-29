@@ -88,12 +88,12 @@ bool ConstraintList::Iterator::operator!=(const Iterator& rhs) const
 
 ConstraintList::Iterator::value_type ConstraintList::Iterator::operator*()
 {
-    return cl->order[index];
+    return cl->order[index].vertex;
 }
 
 void ConstraintList::Iterator::advanceUntilPresentOrEnd()
 {
-    while (index < cl->order.size() && !cl->contains(cl->order[index]))
+    while (index < cl->order.size() && !cl->order[index].present)
         index++;
     return;
 }
@@ -103,41 +103,68 @@ ConstraintGraph::ConstraintGraph(NotNull<BuiltinTypes> builtinTypes)
 {
 }
 
+// Most lists hold a handful of vertices, which a scan finds faster than a hash lookup would.
+static constexpr size_t kConstraintListScanLimit = 8;
+
+std::optional<size_t> ConstraintList::find(ConstraintVertex vertex) const
+{
+    if (order.size() <= kConstraintListScanLimit)
+    {
+        for (size_t i = 0; i < order.size(); ++i)
+        {
+            if (order[i].vertex == vertex)
+                return i;
+        }
+
+        return std::nullopt;
+    }
+
+    if (const size_t* position = positions.find(vertex))
+        return *position;
+
+    return std::nullopt;
+}
+
 bool ConstraintList::contains(ConstraintVertex vertex) const
 {
-    if (auto entry = present.find(vertex))
-        return *entry;
-    return false;
+    std::optional<size_t> position = find(vertex);
+    return position && order[*position].present;
 }
 
 void ConstraintList::insert(ConstraintVertex vertex)
 {
-    auto [entry, fresh] = present.try_insert(vertex, true);
-    if (fresh)
+    if (std::optional<size_t> position = find(vertex))
     {
-        order.emplace_back(vertex);
-        entries++;
-        insertions++;
+        // A vertex that was removed returns to its original place in the order.
+        if (!order[*position].present)
+        {
+            order[*position].present = true;
+            entries++;
+            insertions++;
+        }
+
+        return;
     }
-    else if (!entry)
+
+    order.push_back(Entry{vertex, true});
+    entries++;
+    insertions++;
+
+    // The first insertion past the limit indexes every entry; later ones only index themselves.
+    if (order.size() > kConstraintListScanLimit)
     {
-        entry = true;
-        entries++;
-        insertions++;
+        for (size_t i = positions.size(); i < order.size(); ++i)
+            positions[order[i].vertex] = i;
     }
-    // If the entry was *not* fresh and its value was already true, then do
-    // nothing: the set state has not changed.
 }
 
 void ConstraintList::remove(ConstraintVertex vertex)
 {
-    if (auto entry = present.find(vertex))
+    std::optional<size_t> position = find(vertex);
+    if (position && order[*position].present)
     {
-        // If the entry is true then we also need to decrement the number of
-        // entries in the constraint list.
-        if (*entry)
-            entries--;
-        *entry = false;
+        order[*position].present = false;
+        entries--;
     }
 }
 
@@ -154,7 +181,7 @@ size_t ConstraintList::insertionCount() const
 void ConstraintList::clear()
 {
     order.clear();
-    present.clear();
+    positions.clear();
     entries = 0;
 }
 
