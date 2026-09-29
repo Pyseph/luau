@@ -10,6 +10,7 @@ LUAU_FASTFLAG(DebugLuauLogSolver)
 LUAU_FASTFLAG(LuauTraverseScopeToFunction)
 LUAU_FASTFLAG(LuauReferenceCountInitializerIsIterative)
 LUAU_FASTFLAG(LuauSkipUnusedTypeTraversals)
+LUAU_FASTFLAGVARIABLE(LuauCopyDependenciesOnce)
 
 namespace Luau
 {
@@ -116,11 +117,13 @@ void ConstraintList::insert(ConstraintVertex vertex)
     {
         order.emplace_back(vertex);
         entries++;
+        insertions++;
     }
     else if (!entry)
     {
         entry = true;
         entries++;
+        insertions++;
     }
     // If the entry was *not* fresh and its value was already true, then do
     // nothing: the set state has not changed.
@@ -141,6 +144,11 @@ void ConstraintList::remove(ConstraintVertex vertex)
 size_t ConstraintList::size() const
 {
     return entries;
+}
+
+size_t ConstraintList::insertionCount() const
+{
+    return insertions;
 }
 
 void ConstraintList::clear()
@@ -361,6 +369,55 @@ void ConstraintGraph::copyDependenciesToReachableTypes(
     }
 }
 
+void ConstraintGraph::copyDependenciesToNewTypes(
+    ConstraintVertex source,
+    NotNull<ConstraintList> sourceDependencies,
+    const TypeIds& mutatedTypes,
+    const TypePackIds& mutatedTypePacks
+)
+{
+    LUAU_ASSERT(FFlag::LuauCopyDependenciesOnce);
+
+    if (mutatedTypes.empty() && mutatedTypePacks.empty())
+        return;
+
+    // Dependencies are only removed by unblocking them, which removes them
+    // from all of their reverse dependencies at once: [source] and every type
+    // we copied them onto. Until [source] gains a dependency, those types
+    // therefore still depend on everything [source] does.
+    CopiedDependencies& copied = copiedDependencies[source];
+    if (copied.insertions != sourceDependencies->insertionCount())
+    {
+        copied.insertions = sourceDependencies->insertionCount();
+        copied.targets.clear();
+    }
+
+    std::vector<ConstraintVertex> newTargets;
+    for (TypeId ty : mutatedTypes)
+    {
+        if (copied.targets.try_insert(ty))
+            newTargets.emplace_back(ty);
+    }
+    for (TypePackId tp : mutatedTypePacks)
+    {
+        if (copied.targets.try_insert(tp))
+            newTargets.emplace_back(tp);
+    }
+
+    if (newTargets.empty())
+        return;
+
+    for (const auto& vertex : *sourceDependencies)
+    {
+        auto vertexReverseDeps = findReverseDependencyList(vertex);
+        for (const auto& target : newTargets)
+        {
+            findDependencyList(target)->insert(vertex);
+            vertexReverseDeps->insert(target);
+        }
+    }
+}
+
 void ConstraintGraph::clearReverseDependenciesOf(ConstraintVertex vertex)
 {
     LUAU_ASSERT(vertex.get_if<const Constraint*>() == nullptr);
@@ -473,8 +530,16 @@ void ConstraintGraph::copyDependenciesOf(T source, T target)
         ReferenceCountInitializer_DEPRECATED rci{NotNull{&mutatedTypes}, NotNull{&mutatedTypePacks}};
         rci.traverse(target);
     }
-    // We do not want to _delete_ the original vertex, so we pass nullopt here.
-    copyDependenciesToReachableTypes(std::nullopt, sourceDependencies, std::move(mutatedTypes), std::move(mutatedTypePacks));
+
+    if (FFlag::LuauCopyDependenciesOnce)
+    {
+        copyDependenciesToNewTypes(source, sourceDependencies, mutatedTypes, mutatedTypePacks);
+    }
+    else
+    {
+        // We do not want to _delete_ the original vertex, so we pass nullopt here.
+        copyDependenciesToReachableTypes(std::nullopt, sourceDependencies, std::move(mutatedTypes), std::move(mutatedTypePacks));
+    }
 }
 
 template void ConstraintGraph::copyDependenciesOf(TypeId source, TypeId target);

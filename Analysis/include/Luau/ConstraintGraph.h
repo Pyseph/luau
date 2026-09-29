@@ -36,6 +36,11 @@ struct ConstraintList
     void clear();
     size_t size() const;
 
+    /**
+     * The number of inserts that have added a vertex to this set.
+     */
+    size_t insertionCount() const;
+
     struct Iterator
     {
         using value_type = const ConstraintVertex;
@@ -66,6 +71,7 @@ private:
     DenseHashMap<ConstraintVertex, bool, HashBlockedConstraintId> present;
     std::vector<ConstraintVertex> order;
     size_t entries = 0;
+    size_t insertions = 0;
 };
 
 
@@ -222,6 +228,32 @@ private:
         TypeIds mutatedTypes,
         TypePackIds mutatedTypePacks
     );
+
+    /**
+     * Like [copyDependenciesToReachableTypes] without an original vertex, but
+     * skips the types and type packs that [copyDependenciesOf] has already
+     * copied the dependencies of [source] onto since [source] last gained a
+     * dependency.
+     */
+    void copyDependenciesToNewTypes(
+        ConstraintVertex source,
+        NotNull<ConstraintList> sourceDependencies,
+        const TypeIds& mutatedTypes,
+        const TypePackIds& mutatedTypePacks
+    );
+
+    struct CopiedDependencies
+    {
+        // The insertion count of the source's dependency list when `targets` was last cleared.
+        size_t insertions = 0;
+        DenseHashSet<ConstraintVertex, HashBlockedConstraintId> targets;
+    };
+
+    /**
+     * For each vertex passed to [copyDependenciesOf], the types and type packs
+     * that already depend on all of its dependencies.
+     */
+    DenseHashMap<ConstraintVertex, CopiedDependencies, HashBlockedConstraintId> copiedDependencies;
 
     /**
      * For all the reverse dependencies of [vertex], remove [vertex] from their
