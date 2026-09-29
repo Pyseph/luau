@@ -510,6 +510,7 @@ if(TARGET Luau.UnitTest)
         tests/CodeAllocator.test.cpp
         tests/Compiler.test.cpp
         tests/Config.test.cpp
+        tests/ConstraintGraph.test.cpp
         tests/ConstraintSolver.test.cpp
         tests/ControlFlowGraph.test.cpp
         tests/CostModel.test.cpp

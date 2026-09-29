@@ -6,6 +6,8 @@
 #include "Luau/ToString.h"
 #include "Luau/Type.h"
 
+#include <optional>
+
 /**
  * It is said that there are only so many unique problems in computer science.
  *
@@ -68,8 +70,18 @@ struct ConstraintList
     Iterator end();
 
 private:
-    DenseHashMap<ConstraintVertex, bool, HashBlockedConstraintId> present;
-    std::vector<ConstraintVertex> order;
+    struct Entry
+    {
+        ConstraintVertex vertex;
+        bool present;
+    };
+
+    std::optional<size_t> find(ConstraintVertex vertex) const;
+
+    // Every vertex ever inserted, in insertion order; a removed vertex stays in place as absent.
+    std::vector<Entry> order;
+    // Positions in `order`, kept only once a list is long enough that scanning it would cost more.
+    DenseHashMap<ConstraintVertex, size_t, HashBlockedConstraintId> positions;
     size_t entries = 0;
     size_t insertions = 0;
 };
