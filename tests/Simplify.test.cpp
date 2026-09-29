@@ -12,6 +12,8 @@ LUAU_FASTFLAG(DebugLuauForceOldSolver)
 LUAU_DYNAMIC_FASTINT(LuauSimplificationComplexityLimit)
 LUAU_FASTFLAG(DebugLuauParseExactTables)
 LUAU_FASTFLAG(DebugLuauExactTableTypes)
+LUAU_FASTFLAG(LuauRelateIndexersTypo)
+LUAU_FASTFLAG(LuauRelateIdenticalIndexerResults)
 
 namespace
 {
@@ -780,6 +782,42 @@ TEST_CASE_FIXTURE(SimplifyFixture, "distinct_empty_inexact_tables_are_coincident
     TypeId right = mkTable({});
 
     CHECK(Relation::Coincident == relate(left, right));
+}
+
+TEST_CASE_FIXTURE(SimplifyFixture, "arrays_of_identical_unions_are_coincident")
+{
+    ScopedFastFlag sffs[] = {
+        {FFlag::LuauRelateIndexersTypo, true},
+        {FFlag::LuauRelateIdenticalIndexerResults, true},
+    };
+
+    auto mkArray = [&](TypeId elementTy, TableState state = TableState::Sealed)
+    {
+        return arena->addType(TableType{{}, TableIndexer{numberTy, elementTy}, TypeLevel{}, state});
+    };
+
+    // Each row of a data-like array such as `{ {1, {2}}, {3, {4}} }` has its own `number | {number}`.
+    TypeId left = mkArray(arena->addType(UnionType{{numberTy, mkArray(numberTy)}}));
+    TypeId right = mkArray(arena->addType(UnionType{{numberTy, mkArray(numberTy)}}));
+    CHECK(Relation::Coincident == relate(left, right));
+
+    TypeId other = mkArray(arena->addType(UnionType{{numberTy, mkArray(stringTy)}}));
+    CHECK(Relation::Intersects == relate(left, other));
+
+    // A table that may still change is only identical to itself.
+    TypeId unsealedLeft = mkArray(arena->addType(UnionType{{numberTy, mkArray(numberTy, TableState::Unsealed)}}));
+    TypeId unsealedRight = mkArray(arena->addType(UnionType{{numberTy, mkArray(numberTy, TableState::Unsealed)}}));
+    CHECK(Relation::Intersects == relate(unsealedLeft, unsealedRight));
+
+    // Recursive element types are not worth comparing; they fall back on relate instead of recursing forever.
+    auto mkList = [&]()
+    {
+        TypeId list = arena->addType(TableType{TableState::Sealed, TypeLevel{}});
+        getMutable<TableType>(list)->props["next"] = Property::rw(arena->addType(UnionType{{list, nilTy}}));
+        return mkArray(list);
+    };
+
+    CHECK(Relation::Intersects == relate(mkList(), mkList()));
 }
 
 TEST_CASE_FIXTURE(ExactTableSimplifyFixture, "exact_table_relations")

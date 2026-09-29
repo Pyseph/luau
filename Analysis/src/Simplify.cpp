@@ -20,6 +20,7 @@ LUAU_DYNAMIC_FASTINTVARIABLE(LuauSimplificationComplexityLimit, 8)
 LUAU_DYNAMIC_FASTINTVARIABLE(LuauTypeSimplificationIterationLimit, 128)
 LUAU_FASTFLAGVARIABLE(LuauCheckReadTyWhenRelatingExtern)
 LUAU_FASTFLAGVARIABLE(LuauRelateIndexersTypo)
+LUAU_FASTFLAGVARIABLE(LuauRelateIdenticalIndexerResults)
 
 namespace Luau
 {
@@ -342,6 +343,76 @@ Relation relateTableToProp(const TableType* leftTable, const std::string& propNa
     }
 }
 
+static bool isIdentical(TypeId left, TypeId right, int& budget);
+
+static bool isIdentical(std::optional<TypeId> left, std::optional<TypeId> right, int& budget)
+{
+    if (left && right)
+        return isIdentical(*left, *right, budget);
+
+    return !left && !right;
+}
+
+// Whether two types have the same structure. Sealed tables, unions and singletons are compared by
+// their contents; anything else must be the very same type. Only small types are worth comparing, so
+// this gives up after `budget` pairs of types, which also stops it on cycles.
+static bool isIdentical(TypeId left, TypeId right, int& budget)
+{
+    left = follow(left);
+    right = follow(right);
+
+    if (left == right)
+        return true;
+
+    if (--budget < 0)
+        return false;
+
+    if (const auto [ls, rs] = get2<SingletonType, SingletonType>(left, right); ls && rs)
+        return *ls == *rs;
+
+    if (const auto [lu, ru] = get2<UnionType, UnionType>(left, right); lu && ru)
+    {
+        if (lu->options.size() != ru->options.size())
+            return false;
+
+        for (size_t i = 0; i < lu->options.size(); ++i)
+        {
+            if (!isIdentical(lu->options[i], ru->options[i], budget))
+                return false;
+        }
+
+        return true;
+    }
+
+    const auto [lt, rt] = get2<TableType, TableType>(left, right);
+    if (!lt || !rt || lt->state != rt->state || (lt->state != TableState::Sealed && lt->state != TableState::Exact))
+        return false;
+
+    if (lt->props.size() != rt->props.size() || lt->indexer.has_value() != rt->indexer.has_value())
+        return false;
+
+    for (auto l = lt->props.begin(), r = rt->props.begin(); l != lt->props.end(); ++l, ++r)
+    {
+        if (l->first != r->first || !isIdentical(l->second.readTy, r->second.readTy, budget) ||
+            !isIdentical(l->second.writeTy, r->second.writeTy, budget))
+            return false;
+    }
+
+    if (!lt->indexer)
+        return true;
+
+    return lt->indexer->isReadOnly == rt->indexer->isReadOnly && isIdentical(lt->indexer->indexType, rt->indexer->indexType, budget) &&
+           isIdentical(lt->indexer->indexResultType, rt->indexer->indexResultType, budget);
+}
+
+static bool isIdentical(TypeId left, TypeId right)
+{
+    LUAU_ASSERT(FFlag::LuauRelateIdenticalIndexerResults);
+
+    int budget = 64;
+    return isIdentical(left, right, budget);
+}
+
 Relation relateTables_DEPRECATED(const TableType* leftTable, const TableType* rightTable, SimplifierSeenSet& seen)
 {
     // FIXME CLI-189216: As noted in the body this is not complete.
@@ -414,7 +485,9 @@ Relation relateTables_DEPRECATED(const TableType* leftTable, const TableType* ri
 
     if (FFlag::LuauRelateIndexersTypo)
     {
-        if (relate(leftTable->indexer->indexResultType, rightTable->indexer->indexResultType, seen) != Relation::Coincident)
+        // relate cannot tell that two distinct unions with the same options are the same type.
+        if (!(FFlag::LuauRelateIdenticalIndexerResults && isIdentical(leftTable->indexer->indexResultType, rightTable->indexer->indexResultType)) &&
+            relate(leftTable->indexer->indexResultType, rightTable->indexer->indexResultType, seen) != Relation::Coincident)
             return Relation::Intersects;
     }
     else
