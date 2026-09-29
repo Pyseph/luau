@@ -37,6 +37,7 @@ LUAU_FASTFLAG(DebugLuauExactTableTypes)
 LUAU_FASTFLAG(LuauRelateIndexersTypo)
 LUAU_FASTFLAG(LuauTraverseScopeToFunction)
 LUAU_FASTFLAG(LuauInferReadOnlyIndexers)
+LUAU_FASTFLAG(LuauRelateIdenticalIndexerResults)
 
 namespace
 {
@@ -7095,6 +7096,27 @@ TEST_CASE_FIXTURE(Fixture, "basic_data_like_array_5")
     )"));
 
     CHECK_EQ("{{ entry: number } | { entry: number? }}", toString(requireType("t"), {/* exhaustive */ true}));
+}
+
+TEST_CASE_FIXTURE(Fixture, "basic_data_like_array_with_union_elements")
+{
+    DOES_NOT_PASS_OLD_SOLVER_GUARD();
+
+    ScopedFastFlag sffs[] = {
+        {FFlag::LuauRelateIndexersTypo, true},
+        {FFlag::LuauRelateIdenticalIndexerResults, true},
+    };
+
+    LUAU_REQUIRE_NO_ERRORS(check(R"(
+        local t = {
+            {1, {1, 2}},
+            {2, {2, 3}},
+            {3, "three"},
+            {4, "four"}
+        }
+    )"));
+
+    CHECK_EQ("{{number | string} | {number | {number}}}", toString(requireType("t"), {/* exhaustive */ true}));
 }
 
 TEST_CASE_FIXTURE(Fixture, "large_data_like_array_can_simplify")
