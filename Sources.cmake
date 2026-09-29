@@ -553,6 +553,7 @@ if(TARGET Luau.UnitTest)
         tests/TopoSort.test.cpp
         tests/ToString.test.cpp
         tests/TxnLog.test.cpp
+        tests/TypedAllocator.test.cpp
         tests/TypeFunction.test.cpp
         tests/TypeFunction.user.test.cpp
         tests/TypeInfer.aliases.test.cpp

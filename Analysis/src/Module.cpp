@@ -19,6 +19,7 @@ LUAU_FASTFLAG(DebugLuauExactTableTypes)
 LUAU_FASTFLAGVARIABLE(LuauExportTypecheckTypepacks)
 LUAU_FASTFLAGVARIABLE(LuauExportAnnotationBinding)
 LUAU_FASTFLAGVARIABLE(LuauClonePublicInterfaceRetainTypeFunctionSolvedStatus)
+LUAU_FASTFLAGVARIABLE(LuauGrowInterfaceArenaBlocks)
 
 namespace Luau
 {
@@ -316,6 +317,14 @@ struct ClonePublicInterface : Substitution
         return TypeFun{std::move(typeParams), std::move(typePackParams), type, tf.definitionLocation};
     }
 };
+
+// Most public interfaces hold a few dozen types, which would otherwise take two 32KiB blocks per module.
+Module::Module(std::shared_ptr<TypeArena> sharedInternalTypes)
+    : interfaceTypes(FFlag::LuauGrowInterfaceArenaBlocks)
+    , internalTypes(std::move(sharedInternalTypes))
+{
+    LUAU_ASSERT(internalTypes);
+}
 
 Module::~Module()
 {

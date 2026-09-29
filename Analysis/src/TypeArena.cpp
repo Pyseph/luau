@@ -7,6 +7,12 @@ LUAU_FASTFLAGVARIABLE(DebugLuauFreezeArena);
 namespace Luau
 {
 
+TypeArena::TypeArena(bool growBlocks)
+    : types(growBlocks)
+    , typePacks(growBlocks)
+{
+}
+
 void TypeArena::clear()
 {
     types.clear();

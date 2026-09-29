@@ -14,6 +14,9 @@ struct Module;
 
 struct TypeArena
 {
+    TypeArena() = default;
+    explicit TypeArena(bool growBlocks);
+
     TypedAllocator<Type> types;
     TypedAllocator<TypePackVar> typePacks;
 

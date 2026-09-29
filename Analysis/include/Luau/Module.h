@@ -75,11 +75,7 @@ struct RequireCycle
 
 struct Module
 {
-    explicit Module(std::shared_ptr<TypeArena> sharedInternalTypes)
-        : internalTypes(std::move(sharedInternalTypes))
-    {
-        LUAU_ASSERT(internalTypes);
-    }
+    explicit Module(std::shared_ptr<TypeArena> sharedInternalTypes);
 
     ~Module();
 
