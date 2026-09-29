@@ -53,6 +53,7 @@ LUAU_FASTFLAGVARIABLE(LuauBlockingTypeAliasExpansion)
 LUAU_FASTFLAG(LuauIterableConstraintMutatesIterator)
 LUAU_FASTFLAGVARIABLE(LuauTraverseScopeToFunction)
 LUAU_FASTFLAG(LuauReferenceCountInitializerIsIterative)
+LUAU_FASTFLAG(LuauAddressIndependentTypeOrder)
 
 namespace Luau
 {
@@ -3592,15 +3593,28 @@ TablePropLookupResult ConstraintSolver::lookupTableProp(
     else if (auto utv = get<UnionType>(subjectType))
     {
         std::vector<TypeId> blocked;
-        std::set<TypeId> options;
+        std::set<TypeId> options_DEPRECATED;
+        TypeIds optionIds;
 
         for (TypeId ty : utv)
         {
             auto result = lookupTableProp(constraint, ty, propName, context, inConditional, suppressSimplification, seen);
             blocked.insert(blocked.end(), result.blockedTypes.begin(), result.blockedTypes.end());
             if (result.propType)
-                options.insert(*result.propType);
+            {
+                if (FFlag::LuauAddressIndependentTypeOrder)
+                    optionIds.insert(*result.propType);
+                else
+                    options_DEPRECATED.insert(*result.propType);
+            }
         }
+
+        // TypeIds keeps the union's order; a std::set orders the types by address, which varies between runs.
+        std::vector<TypeId> options;
+        if (FFlag::LuauAddressIndependentTypeOrder)
+            options = optionIds.take();
+        else
+            options.assign(options_DEPRECATED.begin(), options_DEPRECATED.end());
 
         if (!blocked.empty())
             return {std::move(blocked), std::nullopt};
@@ -3629,15 +3643,28 @@ TablePropLookupResult ConstraintSolver::lookupTableProp(
     else if (auto itv = get<IntersectionType>(subjectType))
     {
         std::vector<TypeId> blocked;
-        std::set<TypeId> options;
+        std::set<TypeId> options_DEPRECATED;
+        TypeIds optionIds;
 
         for (TypeId ty : itv)
         {
             auto result = lookupTableProp(constraint, ty, propName, context, inConditional, suppressSimplification, seen);
             blocked.insert(blocked.end(), result.blockedTypes.begin(), result.blockedTypes.end());
             if (result.propType)
-                options.insert(*result.propType);
+            {
+                if (FFlag::LuauAddressIndependentTypeOrder)
+                    optionIds.insert(*result.propType);
+                else
+                    options_DEPRECATED.insert(*result.propType);
+            }
         }
+
+        // TypeIds keeps the intersection's order; a std::set orders the types by address, which varies between runs.
+        std::vector<TypeId> options;
+        if (FFlag::LuauAddressIndependentTypeOrder)
+            options = optionIds.take();
+        else
+            options.assign(options_DEPRECATED.begin(), options_DEPRECATED.end());
 
         if (!blocked.empty())
             return {std::move(blocked), std::nullopt};

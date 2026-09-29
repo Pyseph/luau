@@ -29,6 +29,7 @@ LUAU_FASTFLAGVARIABLE(LuauDontBlockRefinementUnconditionally)
 LUAU_FASTFLAGVARIABLE(LuauSetmetatableOverrides)
 LUAU_FLAGVERSION(LuauSetmetatableOverrides, 2)
 LUAU_FASTFLAG(LuauTraverseScopeToFunction)
+LUAU_FASTFLAGVARIABLE(LuauAddressIndependentTypeOrder)
 
 namespace Luau
 {
@@ -1617,7 +1618,8 @@ TypeFunctionReductionResult<TypeId> intersectTypeFunction(
     // fold over the types with `simplifyIntersection`
     TypeId resultTy = ctx->builtins->unknownType;
     // collect types which caused intersection to return never
-    DenseHashSet<TypeId> unintersectableTypes;
+    DenseHashSet<TypeId> unintersectableTypes_DEPRECATED;
+    TypeIds unintersectableTypes;
     for (auto ty : types)
     {
         // skip any `*no-refine*` types.
@@ -1627,7 +1629,12 @@ TypeFunctionReductionResult<TypeId> intersectTypeFunction(
         if (auto simpleResult = intersectWithSimpleDiscriminant(ctx->builtins, ctx->arena, resultTy, ty))
         {
             if (get<NeverType>(*simpleResult))
-                unintersectableTypes.insert(follow(ty));
+            {
+                if (FFlag::LuauAddressIndependentTypeOrder)
+                    unintersectableTypes.insert(follow(ty));
+                else
+                    unintersectableTypes_DEPRECATED.insert(follow(ty));
+            }
             else
                 resultTy = *simpleResult;
             continue;
@@ -1639,7 +1646,10 @@ TypeFunctionReductionResult<TypeId> intersectTypeFunction(
         // rest
         if (get<NeverType>(result.result))
         {
-            unintersectableTypes.insert(follow(ty));
+            if (FFlag::LuauAddressIndependentTypeOrder)
+                unintersectableTypes.insert(follow(ty));
+            else
+                unintersectableTypes_DEPRECATED.insert(follow(ty));
             continue;
         }
         for (TypeId blockedType : result.blockedTypes)
@@ -1651,18 +1661,30 @@ TypeFunctionReductionResult<TypeId> intersectTypeFunction(
         resultTy = result.result;
     }
 
-    if (!unintersectableTypes.empty())
+    if (FFlag::LuauAddressIndependentTypeOrder && !unintersectableTypes.empty())
     {
-        unintersectableTypes.insert(resultTy);
-        if (unintersectableTypes.size() > 1)
+        // The order of the parts is observable (`{string} & ~table` normalizes to never, `~table & {string}` does not),
+        // so it follows the arguments: what they intersected to first, then the ones that could not be intersected.
+        TypeIds parts{resultTy};
+        parts.insert(unintersectableTypes.begin(), unintersectableTypes.end());
+        if (parts.size() > 1)
+            return {ctx->arena->addType(IntersectionType{parts.take()}), Reduction::MaybeOk, {}, {}};
+        else
+            return {resultTy, Reduction::MaybeOk, {}, {}};
+    }
+    else if (!FFlag::LuauAddressIndependentTypeOrder && !unintersectableTypes_DEPRECATED.empty())
+    {
+        unintersectableTypes_DEPRECATED.insert(resultTy);
+        if (unintersectableTypes_DEPRECATED.size() > 1)
         {
-            TypeId intersection =
-                ctx->arena->addType(IntersectionType{std::vector<TypeId>(unintersectableTypes.begin(), unintersectableTypes.end())});
+            TypeId intersection = ctx->arena->addType(
+                IntersectionType{std::vector<TypeId>(unintersectableTypes_DEPRECATED.begin(), unintersectableTypes_DEPRECATED.end())}
+            );
             return {intersection, Reduction::MaybeOk, {}, {}};
         }
         else
         {
-            return {*unintersectableTypes.begin(), Reduction::MaybeOk, {}, {}};
+            return {*unintersectableTypes_DEPRECATED.begin(), Reduction::MaybeOk, {}, {}};
         }
     }
     // if the intersection simplifies to `never`, this gives us bad autocomplete.
