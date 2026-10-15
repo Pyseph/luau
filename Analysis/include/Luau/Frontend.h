@@ -31,6 +31,7 @@ struct ModuleResolver;
 struct ParseResult;
 struct HotComment;
 struct BuildQueueItem;
+struct BuildQueueModuleInfo;
 struct BuildQueueWorkState;
 struct FrontendCancellationToken;
 
@@ -94,6 +95,43 @@ struct SourceNode
     double autocompleteLimitsMult = 1.0;
 };
 
+// Lets an embedder reuse modules checked earlier, in another process even, instead of checking them again. Every
+// method runs on the thread that checks the module and may run on several threads at once.
+struct ModuleCheckCache
+{
+    virtual ~ModuleCheckCache() = default;
+
+    // Before an acyclic module checked without full type graphs is checked. A module returned here is recorded as the
+    // result of the check, which does not run. `requireCycles` are the cycles through this module's requires, whose
+    // targets the check treats as `any`: they depend on other modules' requires, so a result depends on them too.
+    virtual ModulePtr load(const SourceNode& node, const SourceModule& source, Mode mode, const std::vector<RequireCycle>& requireCycles) = 0;
+
+    // From any thread, as soon as `source` is parsed and its requires traced: whether `load` is likely to answer for it,
+    // in which case its syntax tree is given back until a check needs it. A wrong guess costs a second parse.
+    virtual bool expectsLoad(const SourceModule& source, const SourceCode& code)
+    {
+        return false;
+    }
+
+    // Installed on the checking thread for as long as `source` is checked and linted; may be null.
+    virtual ExternTypeObserver* observerFor(const SourceModule& source)
+    {
+        return nullptr;
+    }
+
+    // After `source` was checked, linted and, without full type graphs, stripped of its internal types.
+    virtual void checked(
+        const SourceNode& node,
+        const SourceModule& source,
+        const ModulePtr& module,
+        const std::vector<RequireCycle>& requireCycles,
+        ExternTypeObserver* observer
+    ) = 0;
+
+    // Instead of `checked`, when checking `source` threw.
+    virtual void abandoned(ExternTypeObserver* observer) {}
+};
+
 struct FrontendOptions
 {
     // When true, we retain full type information about every term in the AST.
@@ -128,6 +166,21 @@ struct FrontendOptions
     std::function<void(const SourceModule& sourceModule, const Luau::Module& module)> customModuleCheck;
 
     bool collectTypeAllocationStats = false;
+
+    // Consulted for every module this check builds; see ModuleCheckCache.
+    std::shared_ptr<ModuleCheckCache> moduleCache;
+
+    // Without full type graphs, a checked module's syntax tree is given back once the check is done and its source
+    // marked dirty, so that a later check of the module reads and parses it afresh. A module whose own user-defined
+    // type functions its interface refers to keeps its tree. With a parallel build, every module parsed for the check
+    // also keeps only its text until its turn comes, so that a closure's trees are never all alive at once.
+    bool releaseSyntaxAfterCheck = false;
+
+    // Called on the checking thread once a module without full type graphs is checked, linted and given its structural
+    // errors, while the types its errors mention are still alive. Returning true says the embedder kept what it needs
+    // of them: the module's errors are then dropped rather than copied, with every type they mention, into its
+    // interface arena.
+    std::function<bool(const SourceModule&, const ModulePtr&)> renderErrors;
 };
 
 struct CheckResult
@@ -236,6 +289,10 @@ struct Frontend
         bool typeCheckForAutocomplete = false
     );
 
+    // Copies a successfully loaded definitions file into another set of globals, as loading it there would: the check
+    // does not depend on the globals it lands in, so the second set needs the copy and not a second check.
+    void persistDefinitionFile(const LoadDefinitionFileResult& loaded, GlobalTypes& globals, ScopePtr targetScope, const std::string& packageName);
+
     // Batch module checking. Queue modules and check them together, retrieve results with 'getCheckResult'
     // If provided, 'executeTasks' function is allowed to call any item in 'tasks' on any thread and return without waiting for them to complete
     void queueModuleCheck(const std::vector<ModuleName>& names);
@@ -273,6 +330,50 @@ private:
     std::pair<SourceNode*, SourceModule*> getSourceNode(const ModuleName& name, const TypeCheckLimits& limits);
     SourceModule parse(const ModuleName& name, std::string_view src, const ParseOptions& parseOptions);
 
+    // A module read, parsed and traced but not yet recorded: the half of getSourceNode any thread may do, given resolvers
+    // that answer reads from any thread.
+    struct PreparedSource
+    {
+        ModuleName name;
+        std::optional<SourceCode> source;
+        std::optional<std::string> environmentName;
+        SourceModule module;
+        RequireTraceResult trace;
+        double timeRead = 0;
+        double timeParse = 0;
+        size_t lines = 0;
+    };
+
+    // With `deferTo`, a module it expects to load keeps its text instead of its syntax tree (SourceModule::deferredSyntax);
+    // with `deferAll`, every module does, and is parsed again right before it is checked.
+    PreparedSource prepareSource(
+        const ModuleName& name,
+        const ParseOptions& parseOptions,
+        const TypeCheckLimits& limits,
+        ModuleCheckCache* deferTo = nullptr,
+        bool deferAll = false
+    );
+    std::pair<SourceNode*, SourceModule*> installSource(PreparedSource&& prepared);
+
+    // Parses a module whose syntax was deferred and traces its requires again; their list is unchanged, being the same
+    // text's. Safe on a checking thread: it writes only this module's source and its existing require trace entry.
+    void restoreSyntax(SourceModule& sourceModule, const TypeCheckLimits& limits);
+
+    // Gives a checked or loaded module's syntax tree back until it is checked again (see releaseSyntaxAfterCheck). Safe
+    // on a checking thread, for the same reason as restoreSyntax.
+    void releaseUntilChecked(SourceNode& sourceNode, SourceModule& sourceModule);
+
+    // Reads, parses and traces every module parseGraph would reach from `roots` and have to (re)parse, a frontier at a
+    // time on `executeTasks`, so that the walk itself finds them all parsed.
+    void prefetchSources(
+        const std::vector<ModuleName>& roots,
+        const TypeCheckLimits& limits,
+        bool forAutocomplete,
+        const std::function<void(std::vector<std::function<void()>> tasks)>& executeTasks,
+        ModuleCheckCache* deferTo = nullptr,
+        bool deferAll = false
+    );
+
     bool parseGraph(
         std::vector<ModuleName>& buildQueue,
         const ModuleName& root,
@@ -291,6 +392,7 @@ private:
     void computeSCCs(const std::vector<ModuleName>& buildQueue);
     void checkSCCBuildQueueItem(BuildQueueItem& item);
     void checkBuildQueueItem(BuildQueueItem& item);
+    void addStructuralErrors(Module& module, const BuildQueueModuleInfo& moduleInfo, Mode mode);
     void checkBuildQueueItems(std::vector<BuildQueueItem>& items);
     void recordItemResult(const BuildQueueItem& item);
     void performQueueItemTask(std::shared_ptr<BuildQueueWorkState> state, size_t itemPos);

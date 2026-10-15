@@ -2228,7 +2228,7 @@ TypeFunctionReductionResult<TypeId> indexFunctionImpl(
             for (TypeId ty : *typesToFind)
             {
                 // Search for all instances of indexer in class->props and class->indexer
-                if (searchPropsAndIndexer(ty, externTy->props, externTy->indexer, properties, ctx))
+                if (searchPropsAndIndexer(ty, externTy->props.observe(), externTy->indexer, properties, ctx))
                     continue; // Indexer was found in this class, so we can move on to the next
 
                 auto parent = externTy->parent;
@@ -2236,7 +2236,7 @@ TypeFunctionReductionResult<TypeId> indexFunctionImpl(
                 while (parent && !foundInParent)
                 {
                     auto parentExternType = get<ExternType>(follow(*parent));
-                    foundInParent = searchPropsAndIndexer(ty, parentExternType->props, parentExternType->indexer, properties, ctx);
+                    foundInParent = searchPropsAndIndexer(ty, parentExternType->props.observe(), parentExternType->indexer, properties, ctx);
                     parent = parentExternType->parent;
                 }
 

@@ -11,6 +11,14 @@
 namespace Luau
 {
 
+// A variant keeps an alternative this is true for on the heap, holding only a pointer to it, so that the few large
+// alternatives of a variant whose instances are mostly small ones do not set the size of every instance. Moving such a
+// variant moves the pointer; the moved-from variant holds no value until it is assigned or destroyed.
+template<typename T>
+struct VariantBoxed : std::false_type
+{
+};
+
 template<typename... Ts>
 class Variant
 {
@@ -52,7 +60,7 @@ public:
     {
         static_assert(std::is_default_constructible_v<first_alternative>, "first alternative type must be default constructible");
         typeId = 0;
-        new (&storage) first_alternative();
+        constructParens<first_alternative>(&storage);
     }
 
     template<typename T>
@@ -62,7 +70,7 @@ public:
 
         constexpr int tid = getTypeId<T>();
         typeId = tid;
-        new (&storage) TT(std::forward<T>(value));
+        constructParens<TT>(&storage, std::forward<T>(value));
     }
 
     Variant(const Variant& other)
@@ -111,9 +119,7 @@ public:
 
         tableDtor[typeId](&storage);
         typeId = tid;
-        new (&storage) TT{std::forward<Args>(args)...};
-
-        return *reinterpret_cast<T*>(&storage);
+        return *constructBraces<TT>(&storage, std::forward<Args>(args)...);
     }
 
     template<typename T>
@@ -122,7 +128,7 @@ public:
         constexpr int tid = getTypeId<T>();
         static_assert(tid >= 0, "unsupported T");
 
-        return tid == typeId ? reinterpret_cast<const T*>(&storage) : nullptr;
+        return tid == typeId ? valueOf<T>(&storage) : nullptr;
     }
 
     template<typename T>
@@ -131,7 +137,7 @@ public:
         constexpr int tid = getTypeId<T>();
         static_assert(tid >= 0, "unsupported T");
 
-        return tid == typeId ? reinterpret_cast<T*>(&storage) : nullptr;
+        return tid == typeId ? valueOf<T>(&storage) : nullptr;
     }
 
     bool valueless_by_exception() const
@@ -165,8 +171,53 @@ private:
         return res;
     }
 
-    static constexpr size_t storageSize = cmax({sizeof(Ts)...});
-    static constexpr size_t storageAlign = cmax({alignof(Ts)...});
+    template<typename T>
+    static constexpr bool boxed = VariantBoxed<T>::value;
+
+    template<typename T>
+    static constexpr size_t slotSize = boxed<T> ? sizeof(T*) : sizeof(T);
+
+    template<typename T>
+    static constexpr size_t slotAlign = boxed<T> ? alignof(T*) : alignof(T);
+
+    static constexpr size_t storageSize = cmax({slotSize<Ts>...});
+    static constexpr size_t storageAlign = cmax({slotAlign<Ts>...});
+
+    template<typename T>
+    static T* valueOf(void* slot)
+    {
+        if constexpr (boxed<T>)
+            return *static_cast<T**>(slot);
+        else
+            return static_cast<T*>(slot);
+    }
+
+    template<typename T>
+    static const T* valueOf(const void* slot)
+    {
+        if constexpr (boxed<T>)
+            return *static_cast<T* const*>(slot);
+        else
+            return static_cast<const T*>(slot);
+    }
+
+    template<typename T, typename... Args>
+    static T* constructParens(void* slot, Args&&... args)
+    {
+        if constexpr (boxed<T>)
+            return *new (slot) T*(new T(std::forward<Args>(args)...));
+        else
+            return new (slot) T(std::forward<Args>(args)...);
+    }
+
+    template<typename T, typename... Args>
+    static T* constructBraces(void* slot, Args&&... args)
+    {
+        if constexpr (boxed<T>)
+            return *new (slot) T*(new T{std::forward<Args>(args)...});
+        else
+            return new (slot) T{std::forward<Args>(args)...};
+    }
 
     using FnCopy = void (*)(void*, const void*);
     using FnMove = void (*)(void*, void*) noexcept;
@@ -176,26 +227,37 @@ private:
     template<typename T>
     static void fnCopy(void* dst, const void* src)
     {
-        new (dst) T(*static_cast<const T*>(src));
+        constructParens<T>(dst, *valueOf<T>(src));
     }
 
     template<typename T>
     static void fnMove(void* dst, void* src) noexcept
     {
-        // static_cast<T&&> is equivalent to std::move() but faster in Debug
-        new (dst) T(static_cast<T&&>(*static_cast<T*>(src)));
+        if constexpr (boxed<T>)
+        {
+            new (dst) T*(*static_cast<T**>(src));
+            *static_cast<T**>(src) = nullptr;
+        }
+        else
+        {
+            // static_cast<T&&> is equivalent to std::move() but faster in Debug
+            new (dst) T(static_cast<T&&>(*static_cast<T*>(src)));
+        }
     }
 
     template<typename T>
     static void fnDtor(void* dst)
     {
-        static_cast<T*>(dst)->~T();
+        if constexpr (boxed<T>)
+            delete *static_cast<T**>(dst);
+        else
+            static_cast<T*>(dst)->~T();
     }
 
     template<typename T>
     static bool fnPredEq(const void* lhs, const void* rhs)
     {
-        return *static_cast<const T*>(lhs) == *static_cast<const T*>(rhs);
+        return *valueOf<T>(lhs) == *valueOf<T>(rhs);
     }
 
     static constexpr FnMove tableMove[sizeof...(Ts)] = {&fnMove<Ts>...};
@@ -222,16 +284,27 @@ T* get_if(Variant<Ts...>* var)
     return var ? var->template get_if<T>() : nullptr;
 }
 
+// The alternative a variant's storage holds, wherever it lives (see VariantBoxed).
+template<typename T>
+static T& variantValue(std::conditional_t<std::is_const_v<T>, const void, void>* src)
+{
+    using Bare = std::remove_const_t<T>;
+    if constexpr (VariantBoxed<Bare>::value)
+        return **static_cast<Bare* const*>(src);
+    else
+        return *static_cast<T*>(src);
+}
+
 template<typename Visitor, typename Result, typename T>
 static void fnVisitR(Visitor& vis, Result& dst, std::conditional_t<std::is_const_v<T>, const void, void>* src)
 {
-    dst = vis(*static_cast<T*>(src));
+    dst = vis(variantValue<T>(src));
 }
 
 template<typename Visitor, typename T>
 static void fnVisitV(Visitor& vis, std::conditional_t<std::is_const_v<T>, const void, void>* src)
 {
-    vis(*static_cast<T*>(src));
+    vis(variantValue<T>(src));
 }
 
 template<class Visitor, typename... Ts>

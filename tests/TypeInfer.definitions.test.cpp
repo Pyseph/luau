@@ -10,6 +10,7 @@
 using namespace Luau;
 
 LUAU_FASTINT(LuauTypeInferRecursionLimit)
+LUAU_FASTFLAG(LuauDefinitionsCopyOnce)
 
 TEST_SUITE_BEGIN("DefinitionTests");
 
@@ -147,6 +148,85 @@ TEST_CASE_FIXTURE(Fixture, "definition_file_extern_types")
     CHECK_EQ(toString(requireType("method2")), "string");
     CHECK_EQ(toString(requireType("metamethod")), "Bar");
     CHECK_EQ(toString(requireType("inheritedMethod")), "number");
+}
+
+// The same declarations and the same uses, whichever way the definitions reach the globals.
+static void checkDefinitionsCopiedIntoTheGlobals(Fixture& fixture)
+{
+    fixture.loadDefinition(R"(
+        declare extern type Foo with
+            X: number
+            function inheritance(self): number
+        end
+
+        declare extern type Bar extends Foo with
+            Y: { [string]: Foo }
+            function foo(self, x: number): number
+            function foo(self, x: string): string
+            function __add(self, other: Bar): Bar
+        end
+
+        export type Pair<T> = { first: T, second: T }
+        declare function pick<T>(pair: Pair<T>, first: boolean): T
+        declare bar: Bar
+    )");
+
+    GlobalTypes& globals = fixture.getFrontend().globals;
+    CHECK_EQ(toString(getGlobalBinding(globals, "pick")), "<T>(Pair<T>, boolean) -> T");
+    CHECK_EQ(toString(getGlobalBinding(globals, "bar")), "Bar");
+    std::optional<TypeFun> pair = globals.globalScope->lookupType("Pair");
+    REQUIRE(pair);
+    CHECK_EQ(toString(pair->type, {true}), "{ first: T, second: T }");
+
+    CheckResult result = fixture.check(R"(
+        local prop: number = bar.Y.anything.X
+        local method: string = bar:foo("string")
+        local metamethod: Bar = bar + bar
+        local picked: string = pick({ first = 1, second = 2 }, true)
+    )");
+
+    REQUIRE_EQ(result.errors.size(), 1);
+    CHECK(get<TypeMismatch>(result.errors[0]));
+    CHECK_EQ(result.errors[0].location.begin.line, 4);
+    CHECK_EQ(toString(fixture.requireType("metamethod")), "Bar");
+}
+
+TEST_CASE_FIXTURE(Fixture, "a_loaded_definition_file_persists_into_another_set_of_globals")
+{
+    LoadDefinitionFileResult loaded = loadDefinition(R"(
+        declare foo: number
+        export type Pair<T> = { first: T, second: T }
+        declare function pick<T>(pair: Pair<T>, first: boolean): T
+    )");
+
+    Frontend& frontend = getFrontend();
+    GlobalTypes& other = frontend.globalsForAutocomplete;
+    unfreeze(other.globalTypes);
+    frontend.persistDefinitionFile(loaded, other, other.globalScope, "@test");
+    freeze(other.globalTypes);
+
+    CHECK_EQ(toString(getGlobalBinding(other, "foo")), "number");
+    CHECK_EQ(toString(getGlobalBinding(other, "pick")), toString(getGlobalBinding(frontend.globals, "pick")));
+    std::optional<TypeFun> pair = other.globalScope->lookupType("Pair");
+    REQUIRE(pair);
+    CHECK_EQ(toString(pair->type), toString(frontend.globals.globalScope->lookupType("Pair")->type));
+    // A copy of its own, as a second load would have made.
+    CHECK(getGlobalBinding(other, "pick") != getGlobalBinding(frontend.globals, "pick"));
+    CHECK(getGlobalBinding(other, "pick")->owningArena == &other.globalTypes);
+}
+
+TEST_CASE_FIXTURE(Fixture, "definitions_copied_into_the_globals_through_a_public_interface")
+{
+    DOES_NOT_PASS_OLD_SOLVER_GUARD();
+    ScopedFastFlag sff{FFlag::LuauDefinitionsCopyOnce, false};
+    checkDefinitionsCopiedIntoTheGlobals(*this);
+}
+
+TEST_CASE_FIXTURE(Fixture, "definitions_copied_into_the_globals_once_read_the_same")
+{
+    DOES_NOT_PASS_OLD_SOLVER_GUARD();
+    ScopedFastFlag sff{FFlag::LuauDefinitionsCopyOnce, true};
+    checkDefinitionsCopiedIntoTheGlobals(*this);
 }
 
 TEST_CASE_FIXTURE(Fixture, "class_definitions_cannot_overload_non_function")

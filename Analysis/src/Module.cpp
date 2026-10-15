@@ -123,12 +123,14 @@ struct ClonePublicInterface : Substitution
     NotNull<Module> module;
     SolverMode solverMode;
     bool internalTypeEscaped = false;
+    CloneState syntheticClones;
 
     ClonePublicInterface(const TxnLog* log, NotNull<BuiltinTypes> builtinTypes, Module* module, SolverMode solverMode)
         : Substitution(log, &module->interfaceTypes)
         , builtinTypes(builtinTypes)
         , module(module)
         , solverMode(solverMode)
+        , syntheticClones{builtinTypes}
     {
         LUAU_ASSERT(module);
     }
@@ -171,8 +173,25 @@ struct ClonePublicInterface : Substitution
         return false;
     }
 
+    TypeId cloneSynthetic(TypeId ty)
+    {
+        TypeId result = Luau::clone(ty, *arena, syntheticClones);
+        if (result == builtinTypes->errorType)
+        {
+            // A clone-budget failure can leave partial mappings into the source arena.
+            syntheticClones.seenTypes.clear();
+            syntheticClones.seenTypePacks.clear();
+        }
+        return result;
+    }
+
     TypeId clean(TypeId ty) override
     {
+        if (const ErrorType* error = get<ErrorType>(ty); error && error->synthetic && !ty->persistent)
+        {
+            return cloneSynthetic(ty);
+        }
+
         TypeId result = clone(ty);
 
         if (FunctionType* ftv = getMutable<FunctionType>(result))
@@ -220,7 +239,9 @@ struct ClonePublicInterface : Substitution
                 if (auto tfit = get<TypeFunctionInstanceType>(ty))
                 {
                     if (tfit->state == TypeFunctionInstanceState::Stuck)
-                        result = arena->addType(ErrorType{ty});
+                    {
+                        result = arena->addType(ErrorType{cloneSynthetic(ty)});
+                    }
                     else if (FFlag::LuauClonePublicInterfaceRetainTypeFunctionSolvedStatus)
                     {
                         auto resultTfit = getMutable<TypeFunctionInstanceType>(result);
@@ -321,6 +342,7 @@ struct ClonePublicInterface : Substitution
 // Most public interfaces hold a few dozen types, which would otherwise take two 32KiB blocks per module.
 Module::Module(std::shared_ptr<TypeArena> sharedInternalTypes)
     : interfaceTypes(FFlag::LuauGrowInterfaceArenaBlocks)
+    , errorTypes(FFlag::LuauGrowInterfaceArenaBlocks)
     , internalTypes(std::move(sharedInternalTypes))
 {
     LUAU_ASSERT(internalTypes);
@@ -329,6 +351,7 @@ Module::Module(std::shared_ptr<TypeArena> sharedInternalTypes)
 Module::~Module()
 {
     unfreeze(interfaceTypes);
+    unfreeze(errorTypes);
     if (internalTypes)
         unfreeze(*internalTypes);
 }

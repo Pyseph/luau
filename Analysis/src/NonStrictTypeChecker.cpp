@@ -1336,8 +1336,8 @@ void checkNonStrict(
 
     NonStrictTypeChecker typeChecker{NotNull{module->internalTypes.get()}, builtinTypes, typeFunctionRuntime, ice, unifierState, dfg, limits, module};
     typeChecker.visit(sourceModule.root);
-    unfreeze(module->interfaceTypes);
-    copyErrors(module->errors, module->interfaceTypes, builtinTypes);
+    unfreeze(module->errorTypes);
+    copyErrors(module->errors, module->errorTypes, builtinTypes);
 
     module->errors.erase(
         std::remove_if(
@@ -1351,7 +1351,7 @@ void checkNonStrict(
         module->errors.end()
     );
 
-    freeze(module->interfaceTypes);
+    freeze(module->errorTypes);
 }
 
 } // namespace Luau

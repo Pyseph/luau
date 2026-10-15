@@ -71,6 +71,18 @@ public:
         return stuff.empty();
     }
 
+    // Every value allocated so far, in allocation order.
+    template<typename F>
+    void forEach(F&& f) const
+    {
+        for (size_t i = 0; i < stuff.size(); ++i)
+        {
+            size_t blockSize = (i + 1 == stuff.size()) ? currentBlockSize : blockCapacity(i);
+            for (size_t j = 0; j < blockSize; ++j)
+                f(static_cast<const T&>(stuff[i][j]));
+        }
+    }
+
     size_t size() const
     {
         return previousBlocksSize + currentBlockSize;

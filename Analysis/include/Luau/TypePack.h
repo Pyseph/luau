@@ -62,6 +62,16 @@ struct GenericTypePack
 using BoundTypePack = Unifiable::Bound<TypePackId>;
 using ErrorTypePack = Unifiable::Error<TypePackId>;
 
+// Most packs are plain lists; these rarer, larger alternatives would otherwise set the size of every one of them.
+template<>
+struct VariantBoxed<GenericTypePack> : std::true_type
+{
+};
+template<>
+struct VariantBoxed<TypeFunctionInstanceTypePack> : std::true_type
+{
+};
+
 using TypePackVariant =
     Unifiable::Variant<TypePackId, FreeTypePack, GenericTypePack, TypePack, VariadicTypePack, BlockedTypePack, TypeFunctionInstanceTypePack>;
 
@@ -127,6 +137,9 @@ struct TypePackVar
     TypePackVariant ty;
 
     bool persistent = false;
+
+    // As Type::interfaceNumber.
+    mutable uint32_t interfaceNumber = 0;
 
     // Pointer to the type arena that allocated this pack.
     TypeArena* owningArena = nullptr;

@@ -605,7 +605,7 @@ static void autocompleteProps(
     if (auto cls = get<ExternType>(ty))
     {
         containingExternType = containingExternType.value_or(cls);
-        fillProps(cls->props);
+        fillProps(cls->props.observe());
         if (cls->parent)
             autocompleteProps(module, typeArena, builtinTypes, rootTy, *cls->parent, indexType, nodes, result, seen, containingExternType);
     }

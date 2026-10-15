@@ -254,7 +254,8 @@ private:
 
     void cloneChildren(ErrorType* t)
     {
-        // noop.
+        if (t->synthetic)
+            t->synthetic = shallowClone(*t->synthetic);
     }
 
     void cloneChildren(BoundType* t)

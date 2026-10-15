@@ -59,6 +59,9 @@ LUAU_FLAGVERSION(LuauCyclicRequireTypeInference, 6)
 LUAU_FASTFLAGVARIABLE(LuauCyclicRequireTopLevelAccessError)
 
 LUAU_FASTFLAGVARIABLE(DebugLuauForceOldSolver)
+LUAU_FASTFLAGVARIABLE(LuauPrefetchSourcesInParallel)
+LUAU_FASTFLAGVARIABLE(LuauDeferSyntaxOfCachedModules)
+LUAU_FASTFLAGVARIABLE(LuauDefinitionsCopyOnce)
 LUAU_FASTFLAG(DebugLuauCFG)
 LUAU_FASTFLAG(DebugLuauLogCFG)
 LUAU_FASTFLAG(DebugLuauDumpCFGJson)
@@ -270,6 +273,21 @@ LoadDefinitionFileResult Frontend::loadDefinitionFile(
     persistCheckedTypes(checkedModule, globals, std::move(targetScope), packageName);
 
     return LoadDefinitionFileResult{true, std::move(parseResult), std::move(sourceModule), std::move(checkedModule)};
+}
+
+void Frontend::persistDefinitionFile(
+    const LoadDefinitionFileResult& loaded,
+    GlobalTypes& globals,
+    ScopePtr targetScope,
+    const std::string& packageName
+)
+{
+    LUAU_TIMETRACE_SCOPE("persistDefinitionFile", "Frontend");
+    LUAU_ASSERT(loaded.success && loaded.module);
+    if (!loaded.success || !loaded.module)
+        return;
+
+    persistCheckedTypes(loaded.module, globals, std::move(targetScope), packageName);
 }
 
 namespace
@@ -641,6 +659,22 @@ std::vector<ModuleName> Frontend::checkQueuedModules(
     DenseHashSet<Luau::ModuleName> seen;
 
     std::shared_ptr<BuildQueueWorkState> state = std::make_shared<BuildQueueWorkState>();
+
+    if (FFlag::LuauPrefetchSourcesInParallel && executeTasks)
+    {
+        std::vector<ModuleName> dirtyRoots;
+        for (const ModuleName& name : currModuleQueue)
+        {
+            if (isDirty(name, frontendOptions.forAutocomplete))
+                dirtyRoots.push_back(name);
+        }
+        // Only a check that may load modules from the cache, or gives syntax back after checking, can spare it.
+        const bool mayDefer = FFlag::LuauDeferSyntaxOfCachedModules && getLuauSolverMode() == SolverMode::New &&
+                              !frontendOptions.retainFullTypeGraphs && !frontendOptions.forAutocomplete;
+        ModuleCheckCache* deferTo = mayDefer ? frontendOptions.moduleCache.get() : nullptr;
+        const bool deferAll = mayDefer && frontendOptions.releaseSyntaxAfterCheck;
+        prefetchSources(dirtyRoots, makeTypeCheckLimits(frontendOptions), frontendOptions.forAutocomplete, executeTasks, deferTo, deferAll);
+    }
 
     for (const ModuleName& name : currModuleQueue)
     {
@@ -1063,12 +1097,12 @@ bool Frontend::parseGraph(
     return cyclic;
 }
 
-static bool moduleHasTopLevelReturn(const SourceModule& sourceModule)
+static bool scanTopLevelReturn(const AstStatBlock* root)
 {
-    if (!sourceModule.root)
+    if (!root)
         return false;
 
-    for (AstStat* stat : sourceModule.root->body)
+    for (AstStat* stat : root->body)
     {
         if (stat->is<AstStatReturn>())
         {
@@ -1077,6 +1111,61 @@ static bool moduleHasTopLevelReturn(const SourceModule& sourceModule)
     }
 
     return false;
+}
+
+// A module cache rebuilds a module's own user-defined type functions from its tree, so such a module keeps it.
+static bool definesTypeFunctions(const AstStatBlock* root)
+{
+    if (!root)
+        return false;
+
+    for (AstStat* stat : root->body)
+    {
+        if (stat->is<AstStatTypeFunction>())
+            return true;
+    }
+
+    return false;
+}
+
+static bool moduleHasTopLevelReturn(const SourceModule& sourceModule)
+{
+    if (sourceModule.topLevelReturn)
+        return *sourceModule.topLevelReturn;
+
+    return scanTopLevelReturn(sourceModule.root);
+}
+
+// Whether a type `arena` holds names one of its types into the module's syntax: a pending alias expansion, or an
+// instance of the module's own user-defined type function. Without full type graphs, everything a module keeps of its
+// own lives in its interface arena and in the arena of the types its errors mention.
+static bool arenaNamesSyntax(const TypeArena& arena)
+{
+    bool found = false;
+    arena.types.forEach(
+        [&](const Type& type)
+        {
+            if (found)
+                return;
+            if (get_if<PendingExpansionType>(&type.ty))
+                found = true;
+            else if (const TypeFunctionInstanceType* tfit = get_if<TypeFunctionInstanceType>(&type.ty); tfit && tfit->userFuncName)
+                found = true;
+        }
+    );
+    return found;
+}
+
+// Gives a module's syntax tree back; `topLevelReturn` and `mode` keep what the walk and the check read without it.
+static void releaseSyntax(SourceModule& sourceModule)
+{
+    sourceModule.root = nullptr;
+    sourceModule.allocator.reset();
+    sourceModule.names.reset();
+    sourceModule.hotcomments.clear();
+    sourceModule.hotcomments.shrink_to_fit();
+    sourceModule.commentLocations.clear();
+    sourceModule.commentLocations.shrink_to_fit();
 }
 
 // Iterative Tarjan's SCC algorithm over the require graph.
@@ -1470,17 +1559,19 @@ static void errorOnCyclicTopLevelAccess(const SourceModule& sourceModule, const 
 
 void Frontend::checkSCCBuildQueueItem(BuildQueueItem& item)
 {
+    InternalErrorReporter localIce{iceHandler.onInternalError, {}};
+
     ModuleSCCPtr scc = item.scc;
     LUAU_ASSERT(scc->sharedArena);
 
     TypeCheckLimits typeCheckLimits = makeTypeCheckLimits(item.options);
 
-    UnifierSharedState unifierState{NotNull{&iceHandler}};
+    UnifierSharedState unifierState{NotNull{&localIce}};
     unifierState.counters.recursionLimit = FInt::LuauTypeInferRecursionLimit;
     unifierState.counters.iterationLimit = typeCheckLimits.unifierIterationLimit.value_or(FInt::LuauTypeInferIterationLimit);
 
     Normalizer normalizer{scc->sharedArena.get(), builtinTypes, NotNull{&unifierState}, SolverMode::New};
-    TypeFunctionRuntime typeFunctionRuntime{NotNull{&iceHandler}, NotNull{&typeCheckLimits}};
+    TypeFunctionRuntime typeFunctionRuntime{NotNull{&localIce}, NotNull{&typeCheckLimits}};
     typeFunctionRuntime.allowEvaluation = true;
 
     // Per-module ConstraintGenerator data for this SCC that needs to be preserved for later use in the ConstraintSolver
@@ -1496,6 +1587,12 @@ void Frontend::checkSCCBuildQueueItem(BuildQueueItem& item)
 
     std::vector<TypeError> mergedErrors;
     std::vector<ConstraintPtr> mergedDeferredConstraints;
+
+    for (BuildQueueModuleInfo& moduleInfo : item.modules)
+    {
+        if (moduleInfo.sourceModule->deferredSyntax)
+            restoreSyntax(*moduleInfo.sourceModule, typeCheckLimits);
+    }
 
     // Run constraint generation for each module
     for (size_t i = 0; i < item.modules.size(); i++)
@@ -1526,10 +1623,10 @@ void Frontend::checkSCCBuildQueueItem(BuildQueueItem& item)
         module->names = sourceModule.names;
         module->root = sourceModule.root;
 
-        iceHandler.moduleName = sourceModule.name;
+        localIce.moduleName = sourceModule.name;
 
         cgData[i].dfg = std::make_unique<DataFlowGraph>(
-            DataFlowGraphBuilder::build(sourceModule.root, NotNull{&module->defArena}, NotNull{&module->keyArena}, NotNull{&iceHandler})
+            DataFlowGraphBuilder::build(sourceModule.root, NotNull{&module->defArena}, NotNull{&module->keyArena}, NotNull{&localIce})
         );
 
         ScopePtr environmentScope = moduleInfo.environmentScope;
@@ -1546,7 +1643,7 @@ void Frontend::checkSCCBuildQueueItem(BuildQueueItem& item)
             NotNull{&typeFunctionRuntime},
             NotNull{&moduleResolver},
             builtinTypes,
-            NotNull{&iceHandler},
+            NotNull{&localIce},
             environmentScope ? environmentScope : globals.globalScope,
             globals.globalTypeFunctionScope,
             std::move(prepareModuleScopeWrap),
@@ -1612,7 +1709,7 @@ void Frontend::checkSCCBuildQueueItem(BuildQueueItem& item)
         std::move(mergedDeferredConstraints),
     };
 
-    Subtyping subtyping{builtinTypes, NotNull{scc->sharedArena.get()}, NotNull{&normalizer}, NotNull{&typeFunctionRuntime}, NotNull{&iceHandler}};
+    Subtyping subtyping{builtinTypes, NotNull{scc->sharedArena.get()}, NotNull{&normalizer}, NotNull{&typeFunctionRuntime}, NotNull{&localIce}};
 
     ConstraintSolver cs{
         NotNull{&normalizer},
@@ -1693,7 +1790,7 @@ void Frontend::checkSCCBuildQueueItem(BuildQueueItem& item)
                     Luau::checkNonStrict(
                         builtinTypes,
                         NotNull{&typeFunctionRuntime},
-                        NotNull{&iceHandler},
+                        NotNull{&localIce},
                         NotNull{&unifierState},
                         NotNull{cgData[i].dfg.get()},
                         NotNull{&typeCheckLimits},
@@ -1730,7 +1827,7 @@ void Frontend::checkSCCBuildQueueItem(BuildQueueItem& item)
 
         // Clone public interface
         unfreeze(module->interfaceTypes);
-        module->clonePublicInterface(builtinTypes, iceHandler, SolverMode::New);
+        module->clonePublicInterface(builtinTypes, localIce, SolverMode::New);
 
         if (module->mode == Mode::NoCheck)
         {
@@ -1806,6 +1903,9 @@ void Frontend::checkBuildQueueItem(BuildQueueItem& item)
 
     if (item.options.forAutocomplete)
     {
+        if (moduleInfo.sourceModule->deferredSyntax)
+            restoreSyntax(*moduleInfo.sourceModule, typeCheckLimits);
+
         // The autocomplete typecheck is always in strict mode with DM awareness to provide better type information for IDE features
         ModulePtr moduleForAutocomplete = check(
             sourceModule,
@@ -1843,6 +1943,51 @@ void Frontend::checkBuildQueueItem(BuildQueueItem& item)
         moduleInfo.module = moduleForAutocomplete;
         return;
     }
+
+    ModuleCheckCache* cache = getLuauSolverMode() == SolverMode::New ? item.options.moduleCache.get() : nullptr;
+    if (cache && !item.options.retainFullTypeGraphs)
+    {
+        if (ModulePtr loaded = cache->load(sourceNode, sourceModule, mode, requireCycles))
+        {
+            loaded->checkDurationSec = getTimestamp() - timestamp;
+            moduleInfo.stats.timeCheck += loaded->checkDurationSec;
+            addStructuralErrors(*loaded, moduleInfo, mode);
+            moduleInfo.module = loaded;
+
+            // Nothing reads a loaded module's syntax until it is checked again, and marking its source dirty makes that
+            // check parse it afresh first; a clean module is never revisited, so it costs nothing until then.
+            if (!loaded->root)
+                releaseUntilChecked(sourceNode, *moduleInfo.sourceModule);
+            return;
+        }
+    }
+
+    if (moduleInfo.sourceModule->deferredSyntax)
+        restoreSyntax(*moduleInfo.sourceModule, typeCheckLimits);
+
+    // Restores the thread's previous observer however the check ends, and tells the cache when it threw.
+    struct ObservedCheck
+    {
+        ModuleCheckCache* cache;
+        ExternTypeObserver* observer;
+        ExternTypeObserver* previous;
+        bool finished = false;
+
+        ObservedCheck(ModuleCheckCache* cache, ExternTypeObserver* observer)
+            : cache(cache)
+            , observer(observer)
+            , previous(observer ? setExternTypeObserver(observer) : nullptr)
+        {
+        }
+
+        ~ObservedCheck()
+        {
+            if (observer)
+                setExternTypeObserver(previous);
+            if (cache && !finished)
+                cache->abandoned(observer);
+        }
+    } observedCheck{cache, cache ? cache->observerFor(sourceModule) : nullptr};
 
     ModulePtr module = check(
         sourceModule,
@@ -1898,13 +2043,30 @@ void Frontend::checkBuildQueueItem(BuildQueueItem& item)
         module->lintResult = classifyLints(warnings, config);
     }
 
+    bool structuralErrorsAdded = false;
+    bool errorsRendered = false;
+    if (!item.options.retainFullTypeGraphs && item.options.renderErrors)
+    {
+        addStructuralErrors(*module, moduleInfo, mode);
+        structuralErrorsAdded = true;
+        errorsRendered = item.options.renderErrors(sourceModule, module);
+        if (errorsRendered)
+        {
+            ErrorVec().swap(module->errors);
+            module->errorTypes.clear();
+        }
+    }
+
     if (!item.options.retainFullTypeGraphs)
     {
         // copyErrors needs to allocate into interfaceTypes as it copies
         // types out of internalTypes, so we unfreeze it here.
-        unfreeze(module->interfaceTypes);
-        copyErrors(module->errors, module->interfaceTypes, builtinTypes);
-        freeze(module->interfaceTypes);
+        if (!errorsRendered)
+        {
+            unfreeze(module->interfaceTypes);
+            copyErrors(module->errors, module->interfaceTypes, builtinTypes);
+            freeze(module->interfaceTypes);
+        }
 
         module->internalTypes->clear();
         module->defArena.allocator.clear();
@@ -1929,9 +2091,44 @@ void Frontend::checkBuildQueueItem(BuildQueueItem& item)
         module->scopes.clear();
     }
 
+    if (!structuralErrorsAdded)
+        addStructuralErrors(*module, moduleInfo, mode);
+
+    if (cache)
+        cache->checked(sourceNode, sourceModule, module, requireCycles, observedCheck.observer);
+    observedCheck.finished = true;
+
+    if (item.options.releaseSyntaxAfterCheck && !item.options.retainFullTypeGraphs && !definesTypeFunctions(sourceModule.root))
+    {
+        module->root = nullptr;
+        // The module shares its source's allocator, which also holds the syntax's names: without this the tree would
+        // outlive its release for as long as the module does.
+        if (!arenaNamesSyntax(module->interfaceTypes) && !arenaNamesSyntax(module->errorTypes))
+        {
+            module->allocator.reset();
+            module->names.reset();
+        }
+        releaseUntilChecked(sourceNode, *moduleInfo.sourceModule);
+    }
+
+    moduleInfo.module = module;
+}
+
+void Frontend::releaseUntilChecked(SourceNode& sourceNode, SourceModule& sourceModule)
+{
+    releaseSyntax(sourceModule);
+    sourceModule.deferredSyntax.reset();
+    // Keyed by nodes of the tree just given back; reparsing traces the new one.
+    if (auto it = requireTrace.find(sourceModule.name); it != requireTrace.end())
+        it->second.exprs.clear();
+    sourceNode.dirtySourceModule = true;
+}
+
+void Frontend::addStructuralErrors(Module& module, const BuildQueueModuleInfo& moduleInfo, Mode mode)
+{
     if (mode != Mode::NoCheck)
     {
-        for (const RequireCycle& cyc : requireCycles)
+        for (const RequireCycle& cyc : moduleInfo.requireCycles)
         {
             std::vector<ModuleName> cycleModules;
             if (FFlag::LuauCyclicRequireTypeInference)
@@ -1949,17 +2146,15 @@ void Frontend::checkBuildQueueItem(BuildQueueItem& item)
             }
 
             TypeError te{cyc.location, moduleInfo.name, ModuleHasCyclicDependency{std::move(cycleModules)}};
-            module->errors.push_back(te);
+            module.errors.push_back(te);
         }
     }
 
     ErrorVec parseErrors;
 
-    for (const ParseError& pe : sourceModule.parseErrors)
+    for (const ParseError& pe : moduleInfo.sourceModule->parseErrors)
         parseErrors.emplace_back(pe.getLocation(), moduleInfo.name, SyntaxError{pe.what()});
-    module->errors.insert(module->errors.begin(), parseErrors.begin(), parseErrors.end());
-
-    moduleInfo.module = module;
+    module.errors.insert(module.errors.begin(), parseErrors.begin(), parseErrors.end());
 }
 
 void Frontend::checkBuildQueueItems(std::vector<BuildQueueItem>& items)
@@ -2066,7 +2261,7 @@ void Frontend::performQueueItemTask(std::shared_ptr<BuildQueueWorkState> state, 
     {
         checkBuildQueueItem(item);
     }
-    catch (const Luau::InternalCompilerError&)
+    catch (...)
     {
         item.exception = std::current_exception();
     }
@@ -2528,7 +2723,18 @@ ModulePtr check(
 
 
     unfreeze(module->interfaceTypes);
-    module->clonePublicInterface(builtinTypes, *iceHandler, SolverMode::New);
+    if (FFlag::LuauDefinitionsCopyOnce && mode == Mode::Definition)
+    {
+        // A definitions module's types are cloned into the globals straight from here (persistCheckedTypes): a public
+        // interface would be a second whole copy that nothing reads.
+        ScopePtr moduleScope = module->getModuleScope();
+        module->returnType = moduleScope->returnType;
+        module->exportedTypeBindings = moduleScope->exportedTypeBindings;
+    }
+    else
+    {
+        module->clonePublicInterface(builtinTypes, *iceHandler, SolverMode::New);
+    }
 
     // It would be nice if we could freeze the arenas before doing type
     // checking, but we'll have to do some work to get there.
@@ -2558,6 +2764,8 @@ ModulePtr Frontend::check(
     TypeCheckLimits typeCheckLimits
 )
 {
+    InternalErrorReporter localIce{iceHandler.onInternalError, {}};
+
     if (getLuauSolverMode() == SolverMode::New)
     {
         auto prepareModuleScopeWrap = [this, forAutocomplete](const ModuleName& name, const ScopePtr& scope)
@@ -2573,7 +2781,7 @@ ModulePtr Frontend::check(
                 mode,
                 requireCycles,
                 builtinTypes,
-                NotNull{&iceHandler},
+                NotNull{&localIce},
                 NotNull{forAutocomplete ? &moduleResolverForAutocomplete : &moduleResolver},
                 NotNull{fileResolver},
                 environmentScope ? *environmentScope : globals.globalScope,
@@ -2599,7 +2807,7 @@ ModulePtr Frontend::check(
             forAutocomplete ? globalsForAutocomplete.globalScope : globals.globalScope,
             forAutocomplete ? &moduleResolverForAutocomplete : &moduleResolver,
             builtinTypes,
-            &iceHandler
+            &localIce
         );
 
         if (prepareModuleScope)
@@ -2639,16 +2847,128 @@ std::pair<SourceNode*, SourceModule*> Frontend::getSourceNode(const ModuleName& 
     LUAU_TIMETRACE_SCOPE("Frontend::getSourceNode", "Frontend");
     LUAU_TIMETRACE_ARGUMENT("name", name.c_str());
 
+    const Config& config = configResolver->getConfig(name, limits);
+    ParseOptions opts = config.parseOptions;
+    opts.captureComments = true;
+    return installSource(prepareSource(name, opts, limits));
+}
+
+Frontend::PreparedSource Frontend::prepareSource(
+    const ModuleName& name,
+    const ParseOptions& parseOptions,
+    const TypeCheckLimits& limits,
+    ModuleCheckCache* deferTo,
+    bool deferAll
+)
+{
+    PreparedSource prepared;
+    prepared.name = name;
+
     double timestamp = getTimestamp();
+    prepared.source = fileResolver->readSource(name);
+    prepared.environmentName = fileResolver->getEnvironmentForModule(name);
+    prepared.timeRead = getTimestamp() - timestamp;
 
-    std::optional<SourceCode> source = fileResolver->readSource(name);
-    std::optional<std::string> environmentName = fileResolver->getEnvironmentForModule(name);
+    if (!prepared.source)
+        return prepared;
 
-    stats.timeRead += getTimestamp() - timestamp;
+    timestamp = getTimestamp();
+    Luau::ParseResult parseResult = Luau::Parser::parse(
+        prepared.source->source.data(), prepared.source->source.size(), *prepared.module.names, *prepared.module.allocator, parseOptions
+    );
+    prepared.timeParse = getTimestamp() - timestamp;
+    prepared.lines = parseResult.lines;
 
-    if (!source)
+    SourceModule& sourceModule = prepared.module;
+    if (!parseResult.errors.empty())
+        sourceModule.parseErrors.insert(sourceModule.parseErrors.end(), parseResult.errors.begin(), parseResult.errors.end());
+
+    if (parseResult.errors.empty() || parseResult.root)
     {
-        if (auto it = sourceNodes.find(name); it != sourceNodes.end())
+        sourceModule.root = parseResult.root;
+        sourceModule.mode = parseMode(parseResult.hotcomments);
+    }
+    else
+    {
+        sourceModule.root = sourceModule.allocator->alloc<AstStatBlock>(Location{}, AstArray<AstStat*>{nullptr, 0});
+        sourceModule.mode = Mode::NoCheck;
+    }
+
+    sourceModule.name = name;
+    sourceModule.humanReadableName = fileResolver->getHumanReadableModuleName(name);
+
+    if (parseOptions.captureComments)
+    {
+        sourceModule.commentLocations = std::move(parseResult.commentLocations);
+        sourceModule.hotcomments = std::move(parseResult.hotcomments);
+    }
+
+    sourceModule.type = prepared.source->type;
+    sourceModule.topLevelReturn = scanTopLevelReturn(sourceModule.root);
+    prepared.trace = traceRequires(fileResolver, sourceModule.root, name, limits);
+
+    const bool keepsTree = definesTypeFunctions(sourceModule.root);
+    const bool expected = deferTo && !keepsTree && deferTo->expectsLoad(sourceModule, *prepared.source);
+    if (expected || (deferAll && !keepsTree))
+    {
+        auto deferred = std::make_shared<SourceModule::DeferredSyntax>();
+        if (!fileResolver->readsAreStable())
+            deferred->source = std::move(prepared.source->source);
+        deferred->options = parseOptions;
+        sourceModule.deferredSyntax = std::move(deferred);
+        releaseSyntax(sourceModule);
+        // Keyed by nodes of the tree just given back; restoreSyntax traces the new one.
+        prepared.trace.exprs.clear();
+    }
+
+    return prepared;
+}
+
+void Frontend::restoreSyntax(SourceModule& sourceModule, const TypeCheckLimits& limits)
+{
+    LUAU_TIMETRACE_SCOPE("Frontend::restoreSyntax", "Frontend");
+
+    std::shared_ptr<const SourceModule::DeferredSyntax> deferred = std::move(sourceModule.deferredSyntax);
+    sourceModule.allocator = std::make_shared<Allocator>();
+    sourceModule.names = std::make_shared<AstNameTable>(*sourceModule.allocator);
+
+    std::optional<SourceCode> reread;
+    if (deferred->source.empty() && fileResolver->readsAreStable())
+        reread = fileResolver->readSource(sourceModule.name);
+    const std::string& text = reread ? reread->source : deferred->source;
+
+    // The first parse's errors and mode are still recorded; only the tree and the comments come back.
+    Luau::ParseResult parseResult = Luau::Parser::parse(text.data(), text.size(), *sourceModule.names, *sourceModule.allocator, deferred->options);
+
+    if (parseResult.errors.empty() || parseResult.root)
+        sourceModule.root = parseResult.root;
+    else
+        sourceModule.root = sourceModule.allocator->alloc<AstStatBlock>(Location{}, AstArray<AstStat*>{nullptr, 0});
+
+    if (deferred->options.captureComments)
+    {
+        sourceModule.commentLocations = std::move(parseResult.commentLocations);
+        sourceModule.hotcomments = std::move(parseResult.hotcomments);
+    }
+
+    RequireTraceResult trace = traceRequires(fileResolver, sourceModule.root, sourceModule.name, limits);
+    auto it = requireTrace.find(sourceModule.name);
+    LUAU_ASSERT(it != requireTrace.end());
+    LUAU_ASSERT(it == requireTrace.end() || it->second.requireList == trace.requireList);
+    if (it != requireTrace.end())
+        it->second.exprs = std::move(trace.exprs);
+}
+
+std::pair<SourceNode*, SourceModule*> Frontend::installSource(PreparedSource&& prepared)
+{
+    const ModuleName& name = prepared.name;
+    stats.timeRead += prepared.timeRead;
+
+    auto it = sourceNodes.find(name);
+
+    if (!prepared.source)
+    {
+        if (it != sourceNodes.end())
         {
             // Remove this module from the dependents set of each of its dependencies
             for (const ModuleName& dep : it->second->requireSet)
@@ -2668,14 +2988,12 @@ std::pair<SourceNode*, SourceModule*> Frontend::getSourceNode(const ModuleName& 
         return {nullptr, nullptr};
     }
 
-    const Config& config = configResolver->getConfig(name, limits);
-    ParseOptions opts = config.parseOptions;
-    opts.captureComments = true;
-    SourceModule result = parse(name, source->source, opts);
-    result.type = source->type;
+    stats.timeParse += prepared.timeParse;
+    stats.files++;
+    stats.lines += prepared.lines;
 
     RequireTraceResult& require = requireTrace[name];
-    require = traceRequires(fileResolver, result.root, name, limits);
+    require = std::move(prepared.trace);
 
     std::shared_ptr<SourceNode>& sourceNode = sourceNodes[name];
 
@@ -2687,8 +3005,8 @@ std::pair<SourceNode*, SourceModule*> Frontend::getSourceNode(const ModuleName& 
     if (!sourceModule)
         sourceModule = std::make_shared<SourceModule>();
 
-    *sourceModule = std::move(result);
-    sourceModule->environmentName = environmentName;
+    *sourceModule = std::move(prepared.module);
+    sourceModule->environmentName = prepared.environmentName;
 
     sourceNode->name = sourceModule->name;
     sourceNode->humanReadableName = sourceModule->humanReadableName;
@@ -2716,6 +3034,131 @@ std::pair<SourceNode*, SourceModule*> Frontend::getSourceNode(const ModuleName& 
     sourceNode->requireLocations = require.requireList;
 
     return {sourceNode.get(), sourceModule.get()};
+}
+
+void Frontend::prefetchSources(
+    const std::vector<ModuleName>& roots,
+    const TypeCheckLimits& limits,
+    bool forAutocomplete,
+    const std::function<void(std::vector<std::function<void()>> tasks)>& executeTasks,
+    ModuleCheckCache* deferTo,
+    bool deferAll
+)
+{
+    LUAU_TIMETRACE_SCOPE("Frontend::prefetchSources", "Frontend");
+
+    DenseHashSet<ModuleName> visited;
+    std::vector<ModuleName> frontier;
+    std::vector<ModuleName> walk;
+
+    // Exactly the modules parseGraph would visit: a root, then the requires of anything dirty. A dirty module whose
+    // source is current is walked through without a parse.
+    auto consider = [&](const ModuleName& name)
+    {
+        walk.push_back(name);
+        while (!walk.empty())
+        {
+            ModuleName current = std::move(walk.back());
+            walk.pop_back();
+            if (visited.contains(current))
+                continue;
+            visited.insert(current);
+
+            auto it = sourceNodes.find(current);
+            if (it == sourceNodes.end() || it->second->hasDirtySourceModule())
+            {
+                frontier.push_back(current);
+                continue;
+            }
+            if (!it->second->hasDirtyModule(forAutocomplete))
+                continue;
+            for (const ModuleName& dep : it->second->requireSet)
+            {
+                auto depIt = sourceNodes.find(dep);
+                if (depIt == sourceNodes.end() || depIt->second->hasDirtyModule(forAutocomplete))
+                    walk.push_back(dep);
+            }
+        }
+    };
+
+    for (const ModuleName& root : roots)
+        consider(root);
+
+    while (!frontier.empty())
+    {
+        std::vector<ModuleName> batch;
+        batch.swap(frontier);
+
+        // The config resolver is not asked to answer from another thread.
+        std::vector<ParseOptions> parseOptions;
+        parseOptions.reserve(batch.size());
+        for (const ModuleName& name : batch)
+        {
+            ParseOptions opts = configResolver->getConfig(name, limits).parseOptions;
+            opts.captureComments = true;
+            parseOptions.push_back(std::move(opts));
+        }
+
+        std::vector<PreparedSource> prepared(batch.size());
+        std::vector<std::exception_ptr> failures(batch.size());
+        std::mutex mutex;
+        std::condition_variable done;
+        size_t remaining = batch.size();
+
+        std::vector<std::function<void()>> tasks;
+        tasks.reserve(batch.size());
+        for (size_t i = 0; i < batch.size(); i++)
+        {
+            tasks.emplace_back(
+                [&, i]()
+                {
+                    try
+                    {
+                        prepared[i] = prepareSource(batch[i], parseOptions[i], limits, deferTo, deferAll);
+                    }
+                    catch (...)
+                    {
+                        failures[i] = std::current_exception();
+                    }
+
+                    std::unique_lock guard(mutex);
+                    if (--remaining == 0)
+                        done.notify_one();
+                }
+            );
+        }
+
+        executeTasks(std::move(tasks));
+        {
+            std::unique_lock guard(mutex);
+            done.wait(
+                guard,
+                [&]
+                {
+                    return remaining == 0;
+                }
+            );
+        }
+
+        for (const std::exception_ptr& failure : failures)
+        {
+            if (failure)
+                std::rethrow_exception(failure);
+        }
+
+        for (PreparedSource& source : prepared)
+        {
+            auto [node, _] = installSource(std::move(source));
+            if (!node)
+                continue;
+            for (const ModuleName& dep : node->requireSet)
+            {
+                auto depIt = sourceNodes.find(dep);
+                if (depIt == sourceNodes.end() || depIt->second->hasDirtyModule(forAutocomplete))
+                    consider(dep);
+            }
+        }
+    }
 }
 
 /** Try to parse a source file into a SourceModule.
@@ -2762,6 +3205,7 @@ SourceModule Frontend::parse(const ModuleName& name, std::string_view src, const
 
     sourceModule.name = name;
     sourceModule.humanReadableName = fileResolver->getHumanReadableModuleName(name);
+    sourceModule.topLevelReturn = scanTopLevelReturn(sourceModule.root);
 
     if (parseOptions.captureComments)
     {

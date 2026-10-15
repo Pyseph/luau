@@ -2429,7 +2429,7 @@ ControlFlow ConstraintGenerator::visit(const ScopePtr& scope, AstStatDeclareExte
             }
         }
 
-        TableType::Props& props = assignToMetatable ? metatable->props : etv->props;
+        TableType::Props& props = assignToMetatable ? metatable->props : etv->props.observeMutable();
 
         if (props.count(propName) == 0)
         {

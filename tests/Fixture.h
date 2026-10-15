@@ -53,7 +53,10 @@ LUAU_FASTFLAG(LuauBetterInferredGenericNames)
 #define DOES_NOT_PASS_WITH_EXACT_TABLES() \
     ScopedFastFlag LUAU_CONCAT(sff_, __COUNTER__){FFlag::DebugLuauExactTableTypes, FFlag::DebugLuauRunFailingExactTableTests}; \
     ScopedFastFlag LUAU_CONCAT(sff_, __COUNTER__){FFlag::DebugLuauParseExactTables, FFlag::DebugLuauRunFailingExactTableTests}; \
-    ScopedFastFlag LUAU_CONCAT(sff_, __COUNTER__){FFlag::DebugLuauForceExactTables, FFlag::DebugLuauRunFailingExactTableTests}
+    ScopedFastFlag LUAU_CONCAT(sff_, __COUNTER__) \
+    { \
+        FFlag::DebugLuauForceExactTables, FFlag::DebugLuauRunFailingExactTableTests \
+    }
 
 // If CALLGRIND is on, then disable the timeout (doctest treats a timeout of 0 as disabled).
 #ifdef CALLGRIND
@@ -116,6 +119,11 @@ struct TestFileResolver
 
     std::optional<SourceCode> readSource(const ModuleName& name) override;
 
+    bool readsAreStable() const override
+    {
+        return stableReads;
+    }
+
     std::optional<ModuleInfo> resolveModule(const ModuleInfo* context, AstExpr* expr, const TypeCheckLimits& limits) override;
 
     std::string getHumanReadableModuleName(const ModuleName& name) const override;
@@ -125,6 +133,8 @@ struct TestFileResolver
     std::unordered_map<ModuleName, std::string> source;
     std::unordered_map<ModuleName, SourceCode::Type> sourceTypes;
     std::unordered_map<ModuleName, std::string> environments;
+    std::unordered_map<ModuleName, int> readCounts;
+    bool stableReads = false;
 };
 
 struct TestConfigResolver : ConfigResolver

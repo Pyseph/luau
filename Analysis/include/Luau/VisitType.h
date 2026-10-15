@@ -324,7 +324,7 @@ struct GenericTypeVisitor
         {
             if (visit(ty, *etv))
             {
-                for (const auto& [name, prop] : etv->props)
+                for (const auto& [name, prop] : etv->props.unobserved())
                 {
                     if (auto ty = prop.readTy)
                         traverse(*ty);

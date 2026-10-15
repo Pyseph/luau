@@ -2613,7 +2613,7 @@ private:
 
     void report(const Location& location, const Property& prop, const char* container, const char* field)
     {
-        std::string suggestion = prop.deprecatedSuggestion.empty() ? "" : format(", use '%s' instead", prop.deprecatedSuggestion.c_str());
+        std::string suggestion = !prop.deprecatedSuggestion ? "" : format(", use '%s' instead", prop.deprecatedSuggestion->c_str());
 
         if (container)
             emitWarning(*context, LintWarning::Code_DeprecatedApi, location, "Member '%s.%s' is deprecated%s", container, field, suggestion.c_str());

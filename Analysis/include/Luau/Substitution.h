@@ -146,6 +146,11 @@ struct Tarjan
         if (ty)
             visitChild(*ty);
     }
+    void visitChild(OptionalTypeId ty)
+    {
+        if (ty)
+            visitChild(*ty);
+    }
 
     // Visit the root vertex.
     TarjanResult visitRoot(TypeId ty);
@@ -253,6 +258,13 @@ protected:
 private:
     template<typename Ty>
     std::optional<Ty> replace(std::optional<Ty> ty);
+    OptionalTypeId replace(OptionalTypeId ty)
+    {
+        if (ty)
+            return replace(*ty);
+        else
+            return std::nullopt;
+    }
 };
 
 } // namespace Luau

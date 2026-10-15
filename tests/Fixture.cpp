@@ -171,6 +171,7 @@ bool TestFileResolver::moduleExists(const ModuleName& moduleName) const
 
 std::optional<SourceCode> TestFileResolver::readSource(const ModuleName& name)
 {
+    ++readCounts[name];
     auto it = source.find(name);
     if (it == source.end())
         return std::nullopt;

@@ -334,9 +334,9 @@ void check(
 
     typeChecker.visit(sourceModule.root);
 
-    unfreeze(module->interfaceTypes);
-    copyErrors(module->errors, module->interfaceTypes, builtinTypes);
-    freeze(module->interfaceTypes);
+    unfreeze(module->errorTypes);
+    copyErrors(module->errors, module->errorTypes, builtinTypes);
+    freeze(module->errorTypes);
 }
 
 TypeChecker2::TypeChecker2(
@@ -4776,7 +4776,7 @@ void TypeChecker2::diagnoseMissingTableKey(UnknownProperty* utk, TypeErrorData& 
     {
         while (etv)
         {
-            accumulate(etv->props);
+            accumulate(etv->props.observe());
 
             if (!etv->parent)
                 break;

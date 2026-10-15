@@ -38,6 +38,30 @@ local x: Account = 5
     CHECK_EQ("Expected this to be 'Account', but got 'number'", toString(result.errors[0]));
 }
 
+TEST_CASE_FIXTURE(BuiltinsFixture, "generic_bounds_mismatch_keeps_its_name_after_internal_types_are_cleared")
+{
+    DOES_NOT_PASS_OLD_SOLVER_GUARD();
+
+    getFrontend().options.retainFullTypeGraphs = false;
+
+    CheckResult result = check(R"(
+        --!strict
+        local function combine<T>(a: { T }, b: { T }): { read T }
+            return {}
+        end
+
+        local x: { number } = {}
+        local y: { boolean } = {}
+        local z = combine(x, y)
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+    const GenericBoundsMismatch* mismatch = get<GenericBoundsMismatch>(result.errors[0]);
+    REQUIRE(mismatch);
+    CHECK_EQ("T", mismatch->genericName);
+    CHECK(toString(result.errors[0]).find("generic type parameter T.") != std::string::npos);
+}
+
 TEST_CASE_FIXTURE(BuiltinsFixture, "binary_op_type_function_errors")
 {
     getFrontend().options.retainFullTypeGraphs = false;

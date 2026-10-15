@@ -119,6 +119,13 @@ struct FileResolver
 
     virtual std::optional<SourceCode> readSource(const ModuleName& name) = 0;
 
+    // Whether reading a module again returns the bytes the first read did, for as long as the Frontend asks. A module
+    // whose syntax is deferred then keeps no copy of its text, and is read again when it is parsed.
+    virtual bool readsAreStable() const
+    {
+        return false;
+    }
+
     virtual std::optional<ModuleInfo> resolveModule(const ModuleInfo* context, AstExpr* expr, const TypeCheckLimits& limits)
     {
         return std::nullopt;

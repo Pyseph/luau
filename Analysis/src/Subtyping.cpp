@@ -39,8 +39,8 @@ namespace Luau
 
 bool SubtypingReasoning::operator==(const SubtypingReasoning& other) const
 {
-    return subPath == other.subPath && superPath == other.superPath && variance == other.variance &&
-           isPropertyModifierViolation == other.isPropertyModifierViolation;
+    return variance == other.variance && isPropertyModifierViolation == other.isPropertyModifierViolation && subPath == other.subPath &&
+           superPath == other.superPath;
 }
 
 size_t SubtypingReasoningHash::operator()(const SubtypingReasoning& r) const

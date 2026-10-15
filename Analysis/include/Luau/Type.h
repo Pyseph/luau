@@ -74,6 +74,105 @@ enum struct SolverMode
 
 using Name = std::string;
 
+// An optional string held in a single pointer, for the texts types and properties rarely have. It reads and converts
+// like the std::optional<std::string> it stands for.
+class OptionalText
+{
+public:
+    OptionalText() = default;
+    OptionalText(std::nullopt_t) {}
+    OptionalText(std::string text)
+        : text(std::make_unique<std::string>(std::move(text)))
+    {
+    }
+    OptionalText(const char* text)
+        : text(std::make_unique<std::string>(text))
+    {
+    }
+    OptionalText(const std::optional<std::string>& text)
+        : text(text ? std::make_unique<std::string>(*text) : nullptr)
+    {
+    }
+    OptionalText(const OptionalText& other)
+        : text(other.text ? std::make_unique<std::string>(*other.text) : nullptr)
+    {
+    }
+    OptionalText(OptionalText&&) noexcept = default;
+
+    OptionalText& operator=(const OptionalText& other)
+    {
+        if (this != &other)
+            text = other.text ? std::make_unique<std::string>(*other.text) : nullptr;
+        return *this;
+    }
+    OptionalText& operator=(OptionalText&&) noexcept = default;
+
+    operator std::optional<std::string>() const
+    {
+        if (!text)
+            return std::nullopt;
+        return *text;
+    }
+
+    explicit operator bool() const
+    {
+        return text != nullptr;
+    }
+    bool has_value() const
+    {
+        return text != nullptr;
+    }
+
+    const std::string& operator*() const
+    {
+        LUAU_ASSERT(text);
+        return *text;
+    }
+    std::string& operator*()
+    {
+        LUAU_ASSERT(text);
+        return *text;
+    }
+    const std::string* operator->() const
+    {
+        LUAU_ASSERT(text);
+        return text.get();
+    }
+    std::string* operator->()
+    {
+        LUAU_ASSERT(text);
+        return text.get();
+    }
+    const std::string& value() const
+    {
+        LUAU_ASSERT(text);
+        return *text;
+    }
+    std::string value_or(std::string fallback) const
+    {
+        return text ? *text : std::move(fallback);
+    }
+
+    void reset()
+    {
+        text.reset();
+    }
+
+    friend bool operator==(const OptionalText& a, const OptionalText& b)
+    {
+        if (!a.text || !b.text)
+            return !a.text && !b.text;
+        return *a.text == *b.text;
+    }
+    friend bool operator!=(const OptionalText& a, const OptionalText& b)
+    {
+        return !(a == b);
+    }
+
+private:
+    std::unique_ptr<std::string> text;
+};
+
 // A free type is one whose exact shape has yet to be fully determined.
 struct FreeType
 {
@@ -85,18 +184,19 @@ struct FreeType
 
     int index;
     TypeLevel level;
-    Scope* scope = nullptr;
 
     // True if this free type variable is part of a mutually
     // recursive type alias whose definitions haven't been
     // resolved yet.
     bool forwardedTypeAlias = false;
 
+    Polarity polarity = Polarity::Unknown;
+
+    Scope* scope = nullptr;
+
     // Only used under local type inference
     TypeId lowerBound = nullptr;
     TypeId upperBound = nullptr;
-
-    Polarity polarity = Polarity::Unknown;
 
     // If set, this free type was created for a primitive literal (string or boolean).
     // When generalized, it will be resolved to its lower-bound singleton if the upper
@@ -120,11 +220,10 @@ struct GenericType
 
     int index;
     TypeLevel level;
+    bool explicitName = false;
+    Polarity polarity = Polarity::Unknown;
     Scope* scope = nullptr;
     Name name;
-    bool explicitName = false;
-
-    Polarity polarity = Polarity::Unknown;
 };
 
 // When an equality constraint is found, it is then "bound" to that type,
@@ -269,9 +368,49 @@ struct FunctionArgument
     Location location;
 };
 
+// The name of the module a type was defined in, shared by every type that names it: copying one copies a reference.
+// A module defines thousands of tables and functions, and each used to hold its own copy of the path.
+class SharedModuleName
+{
+public:
+    SharedModuleName() = default;
+    SharedModuleName(const ModuleName& name);
+    SharedModuleName(const char* name)
+        : SharedModuleName(ModuleName(name))
+    {
+    }
+
+    operator const ModuleName&() const
+    {
+        return name ? *name : none();
+    }
+    const ModuleName& str() const
+    {
+        return *this;
+    }
+    bool empty() const
+    {
+        return !name || name->empty();
+    }
+
+    friend bool operator==(const SharedModuleName& a, const SharedModuleName& b)
+    {
+        return a.name == b.name || a.str() == b.str();
+    }
+    friend bool operator!=(const SharedModuleName& a, const SharedModuleName& b)
+    {
+        return !(a == b);
+    }
+
+private:
+    static const ModuleName& none();
+
+    std::shared_ptr<const ModuleName> name;
+};
+
 struct FunctionDefinition
 {
-    std::optional<ModuleName> definitionModuleName;
+    std::optional<SharedModuleName> definitionModuleName;
     Location definitionLocation;
     std::optional<Location> varargLocation;
     Location originalNameLocation;
@@ -441,6 +580,86 @@ struct TableIndexer
     bool isReadOnly = false;
 };
 
+// An optional type held in a single pointer, nullptr being none, for the many fields that hold one: both sides of every
+// property, and what a table is bound to. It reads and converts like the std::optional<TypeId> it stands for.
+class OptionalTypeId
+{
+public:
+    OptionalTypeId() = default;
+    OptionalTypeId(std::nullopt_t) {}
+    OptionalTypeId(TypeId ty)
+        : ty(ty)
+    {
+    }
+    OptionalTypeId(const std::optional<TypeId>& ty)
+        : ty(ty.value_or(nullptr))
+    {
+    }
+
+    operator std::optional<TypeId>() const
+    {
+        if (!ty)
+            return std::nullopt;
+        return ty;
+    }
+
+    explicit operator bool() const
+    {
+        return ty != nullptr;
+    }
+    bool has_value() const
+    {
+        return ty != nullptr;
+    }
+
+    const TypeId& operator*() const
+    {
+        LUAU_ASSERT(ty);
+        return ty;
+    }
+    TypeId& operator*()
+    {
+        LUAU_ASSERT(ty);
+        return ty;
+    }
+    const TypeId* operator->() const
+    {
+        LUAU_ASSERT(ty);
+        return &ty;
+    }
+    TypeId value() const
+    {
+        LUAU_ASSERT(ty);
+        return ty;
+    }
+    TypeId value_or(TypeId fallback) const
+    {
+        return ty ? ty : fallback;
+    }
+
+    void reset()
+    {
+        ty = nullptr;
+    }
+    TypeId& emplace(TypeId replacement)
+    {
+        ty = replacement;
+        return ty;
+    }
+
+    friend bool operator==(const OptionalTypeId& a, const OptionalTypeId& b)
+    {
+        return a.ty == b.ty;
+    }
+    friend bool operator!=(const OptionalTypeId& a, const OptionalTypeId& b)
+    {
+        return a.ty != b.ty;
+    }
+
+private:
+    TypeId ty = nullptr;
+};
+
 struct Property
 {
     static Property readonly(TypeId ty);
@@ -456,7 +675,8 @@ struct Property
     static Property create(std::optional<TypeId> read, std::optional<TypeId> write);
 
     bool deprecated = false;
-    std::string deprecatedSuggestion;
+    // None when there is no suggestion.
+    OptionalText deprecatedSuggestion;
 
     // If this property was inferred from an expression, this field will be
     // populated with the source location of the corresponding table property.
@@ -467,7 +687,7 @@ struct Property
     std::optional<Location> typeLocation = std::nullopt;
 
     Tags tags;
-    std::optional<std::string> documentationSymbol;
+    OptionalText documentationSymbol;
 
     // DEPRECATED
     // TODO: Kill all constructors in favor of `Property::rw(TypeId read, TypeId write)` and friends.
@@ -496,8 +716,8 @@ struct Property
     bool isWriteOnly() const;
     bool isReadWrite() const;
 
-    std::optional<TypeId> readTy;
-    std::optional<TypeId> writeTy;
+    OptionalTypeId readTy;
+    OptionalTypeId writeTy;
 };
 
 struct TableType
@@ -519,18 +739,18 @@ struct TableType
     TableState state = TableState::Unsealed;
     TypeLevel level;
     Scope* scope = nullptr;
-    std::optional<std::string> name;
+    OptionalText name;
 
     // Sometimes we throw a type on a name to make for nicer error messages, but without creating any entry in the type namespace
     // We need to know which is which when we stringify types.
-    std::optional<std::string> syntheticName;
+    OptionalText syntheticName;
 
     std::vector<TypeId> instantiatedTypeParams;
     std::vector<TypePackId> instantiatedTypePackParams;
-    ModuleName definitionModuleName;
+    SharedModuleName definitionModuleName;
     Location definitionLocation;
 
-    std::optional<TypeId> boundTo;
+    OptionalTypeId boundTo;
     Tags tags;
 
     // We track the number of as-yet-unadded properties to unsealed tables.
@@ -549,13 +769,218 @@ struct MetatableType
     // find their way here sometimes.
     TypeId metatable;
 
-    std::optional<std::string> syntheticName;
+    OptionalText syntheticName;
 };
 
 // Custom userdata of a class type
 struct ClassUserData
 {
     virtual ~ClassUserData() {}
+};
+
+// Receives the observation key of every extern type whose members are read on this thread while it is installed.
+// An embedder that synthesizes extern types (one per instance in a place, say) uses it to learn which of them a
+// module's check depended on, so that a result computed from them can be reused only while they are unchanged.
+struct ExternTypeObserver
+{
+    // Something read every member: iterated them, counted them, or took the whole map.
+    virtual void observe(const void* key) = 0;
+
+    // Something asked for the member `name` alone, present or not.
+    virtual void observeMember(const void* key, const Name& name)
+    {
+        observe(key);
+    }
+
+protected:
+    ~ExternTypeObserver() = default;
+};
+
+// Installs the observer for the calling thread and returns the one it replaces.
+ExternTypeObserver* setExternTypeObserver(ExternTypeObserver* observer);
+void noteExternTypeObserved(const void* key);
+void noteExternTypeMemberObserved(const void* key, const Name& name);
+
+// The members of an extern type. Every access reports `observationKey`, when one is set, to the thread's observer:
+// a lookup by name as that member, anything else as the whole map.
+class ExternTypeProps
+{
+public:
+    using Map = std::map<Name, Property>;
+    using key_type = Map::key_type;
+    using mapped_type = Map::mapped_type;
+    using value_type = Map::value_type;
+    using size_type = Map::size_type;
+    using iterator = Map::iterator;
+    using const_iterator = Map::const_iterator;
+
+    ExternTypeProps() = default;
+    ExternTypeProps(Map map)
+        : map(std::move(map))
+    {
+    }
+
+    ExternTypeProps(std::initializer_list<value_type> values)
+        : map(values)
+    {
+    }
+
+    ExternTypeProps& operator=(Map values)
+    {
+        map = std::move(values);
+        return *this;
+    }
+
+    ExternTypeProps& operator=(std::initializer_list<value_type> values)
+    {
+        map = values;
+        return *this;
+    }
+
+    const void* observationKey = nullptr;
+
+    // The whole member map, for code that hands it on; reading it this way counts as reading every member.
+    const Map& observe() const
+    {
+        note();
+        return map;
+    }
+
+    Map& observeMutable()
+    {
+        note();
+        return map;
+    }
+
+    // For traversals that look through members for types a check owns, which an extern type's members never are:
+    // what they find cannot depend on which members there are.
+    const Map& unobserved() const
+    {
+        return map;
+    }
+
+    iterator begin()
+    {
+        note();
+        return map.begin();
+    }
+
+    iterator end()
+    {
+        return map.end();
+    }
+
+    const_iterator begin() const
+    {
+        note();
+        return map.begin();
+    }
+
+    const_iterator end() const
+    {
+        return map.end();
+    }
+
+    iterator find(const Name& name)
+    {
+        noteMember(name);
+        return map.find(name);
+    }
+
+    const_iterator find(const Name& name) const
+    {
+        noteMember(name);
+        return map.find(name);
+    }
+
+    size_type count(const Name& name) const
+    {
+        noteMember(name);
+        return map.count(name);
+    }
+
+    bool contains(const Name& name) const
+    {
+        noteMember(name);
+        return map.find(name) != map.end();
+    }
+
+    const Property& at(const Name& name) const
+    {
+        noteMember(name);
+        return map.at(name);
+    }
+
+    Property& at(const Name& name)
+    {
+        noteMember(name);
+        return map.at(name);
+    }
+
+    Property& operator[](const Name& name)
+    {
+        noteMember(name);
+        return map[name];
+    }
+
+    size_type size() const
+    {
+        note();
+        return map.size();
+    }
+
+    bool empty() const
+    {
+        note();
+        return map.empty();
+    }
+
+    template<typename... Args>
+    std::pair<iterator, bool> emplace(Args&&... args)
+    {
+        return map.emplace(std::forward<Args>(args)...);
+    }
+
+    template<typename... Args>
+    std::pair<iterator, bool> try_emplace(const Name& name, Args&&... args)
+    {
+        return map.try_emplace(name, std::forward<Args>(args)...);
+    }
+
+    std::pair<iterator, bool> insert(const value_type& value)
+    {
+        return map.insert(value);
+    }
+
+    size_type erase(const Name& name)
+    {
+        return map.erase(name);
+    }
+
+    iterator erase(iterator it)
+    {
+        return map.erase(it);
+    }
+
+    void clear()
+    {
+        map.clear();
+    }
+
+private:
+    void note() const
+    {
+        if (observationKey)
+            noteExternTypeObserved(observationKey);
+    }
+
+    void noteMember(const Name& name) const
+    {
+        if (observationKey)
+            noteExternTypeMemberObserved(observationKey, name);
+    }
+
+    Map map;
 };
 
 struct Obj
@@ -583,7 +1008,7 @@ struct ExternType
     using Props = TableType::Props;
 
     Name name;
-    Props props;
+    ExternTypeProps props;
     std::optional<TypeId> parent;
     std::optional<TypeId> metatable; // metaclass?
     Tags tags;
@@ -602,7 +1027,7 @@ struct ExternType
 
     ExternType(
         Name name,
-        Props props,
+        ExternTypeProps props,
         std::optional<TypeId> parent,
         std::optional<TypeId> metatable,
         Tags tags,
@@ -625,7 +1050,7 @@ struct ExternType
 
     ExternType(
         Name name,
-        Props props,
+        ExternTypeProps props,
         std::optional<TypeId> parent,
         std::optional<TypeId> metatable,
         Tags tags,
@@ -830,6 +1255,32 @@ struct NegationType
 
 using ErrorType = Unifiable::Error<TypeId>;
 
+// Four in five types are small; these few large alternatives would otherwise set the size of every one of them.
+template<>
+struct VariantBoxed<FunctionType> : std::true_type
+{
+};
+template<>
+struct VariantBoxed<TableType> : std::true_type
+{
+};
+template<>
+struct VariantBoxed<ExternType> : std::true_type
+{
+};
+template<>
+struct VariantBoxed<TypeFunctionInstanceType> : std::true_type
+{
+};
+template<>
+struct VariantBoxed<PendingExpansionType> : std::true_type
+{
+};
+template<>
+struct VariantBoxed<LazyType> : std::true_type
+{
+};
+
 using TypeVariant = Unifiable::Variant<
     TypeId,
     FreeType,
@@ -884,7 +1335,11 @@ struct Type final
     // Persistent Types do not get cloned.
     bool persistent = false;
 
-    std::optional<std::string> documentationSymbol;
+    // This type's position in its module's interface numbering (ModuleInterfaceIndex), which checks it against
+    // `types` before trusting it: a copied type carries a number that is not its own. Fills padding.
+    mutable uint32_t interfaceNumber = 0;
+
+    OptionalText documentationSymbol;
 
     // Pointer to the type arena that allocated this type.
     TypeArena* owningArena = nullptr;

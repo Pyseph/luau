@@ -496,10 +496,10 @@ FreeType::FreeType(TypeLevel level, TypeId lowerBound, TypeId upperBound)
 
 FreeType::FreeType(Scope* scope, TypeId lowerBound, TypeId upperBound, Polarity polarity)
     : index(Unifiable::freshIndex())
+    , polarity(polarity)
     , scope(scope)
     , lowerBound(lowerBound)
     , upperBound(upperBound)
-    , polarity(polarity)
 {
 }
 
@@ -527,41 +527,41 @@ GenericType::GenericType(TypeLevel level)
 
 GenericType::GenericType(const Name& name, Polarity polarity)
     : index(Unifiable::freshIndex())
-    , name(name)
     , explicitName(true)
     , polarity(polarity)
+    , name(name)
 {
 }
 
 GenericType::GenericType(Scope* scope, Polarity polarity)
     : index(Unifiable::freshIndex())
-    , scope(scope)
     , polarity(polarity)
+    , scope(scope)
 {
 }
 
 GenericType::GenericType(TypeLevel level, const Name& name)
     : index(Unifiable::freshIndex())
     , level(level)
-    , name(name)
     , explicitName(true)
+    , name(name)
 {
 }
 
 GenericType::GenericType(Scope* scope, const Name& name)
     : index(Unifiable::freshIndex())
+    , explicitName(true)
     , scope(scope)
     , name(name)
-    , explicitName(true)
 {
 }
 
 GenericType::GenericType(Scope* scope, Name name, Polarity polarity)
     : index(Unifiable::freshIndex())
-    , scope(scope)
-    , name(std::move(name))
     , explicitName(true)
     , polarity(polarity)
+    , scope(scope)
+    , name(std::move(name))
 {
 }
 
@@ -660,6 +660,24 @@ FunctionType::FunctionType(
 {
 }
 
+SharedModuleName::SharedModuleName(const ModuleName& name)
+{
+    if (name.empty())
+        return;
+
+    // Types are made a module at a time, so the name a thread made last is nearly always the one asked for again.
+    thread_local std::shared_ptr<const ModuleName> last;
+    if (!last || *last != name)
+        last = std::make_shared<const ModuleName>(name);
+    this->name = last;
+}
+
+const ModuleName& SharedModuleName::none()
+{
+    static const ModuleName nothing;
+    return nothing;
+}
+
 Property::Property() {}
 
 Property::Property(
@@ -672,7 +690,7 @@ Property::Property(
     std::optional<Location> typeLocation
 )
     : deprecated(deprecated)
-    , deprecatedSuggestion(deprecatedSuggestion)
+    , deprecatedSuggestion(deprecatedSuggestion.empty() ? OptionalText{} : OptionalText{deprecatedSuggestion})
     , location(location)
     , typeLocation(typeLocation)
     , tags(tags)
@@ -1046,6 +1064,27 @@ std::optional<TypeLevel> getLevel(TypePackId tp)
         return ftv->level;
     else
         return std::nullopt;
+}
+
+static thread_local ExternTypeObserver* externTypeObserver = nullptr;
+
+ExternTypeObserver* setExternTypeObserver(ExternTypeObserver* observer)
+{
+    ExternTypeObserver* previous = externTypeObserver;
+    externTypeObserver = observer;
+    return previous;
+}
+
+void noteExternTypeObserved(const void* key)
+{
+    if (externTypeObserver)
+        externTypeObserver->observe(key);
+}
+
+void noteExternTypeMemberObserved(const void* key, const Name& name)
+{
+    if (externTypeObserver)
+        externTypeObserver->observeMember(key, name);
 }
 
 const Property* lookupExternTypeProp(const ExternType* cls, const Name& name)

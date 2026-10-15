@@ -25,6 +25,8 @@ LUAU_FASTFLAG(LuauSubtypingMissingPropertiesAsNil)
 LUAU_FASTFLAG(LuauCyclicRequireTypeInference)
 LUAU_FASTFLAG(LuauExportAnnotationBinding)
 LUAU_FASTFLAG(LuauCyclicRequireTopLevelAccessError)
+LUAU_FASTFLAG(LuauPrefetchSourcesInParallel)
+LUAU_FASTFLAG(LuauDeferSyntaxOfCachedModules)
 
 namespace
 {
@@ -3487,6 +3489,183 @@ TEST_CASE_FIXTURE(FrontendFixture, "scc_top_level_access_on_function_call")
 
     CheckResult result = getFrontend().check("game/A");
     LUAU_CHECK_ERROR(result, CyclicModuleTopLevelAccess);
+}
+
+TEST_CASE_FIXTURE(FrontendFixture, "a_checked_module_gives_its_syntax_back_and_parses_it_again_when_rechecked")
+{
+    fileResolver.source["game/A"] = R"(
+        --!strict
+        return { value = 1 }
+    )";
+    fileResolver.source["game/B"] = R"(
+        --!strict
+        local A = require(game.A)
+        local s: string = A.value
+        return {}
+    )";
+
+    FrontendOptions options;
+    options.retainFullTypeGraphs = false;
+    options.releaseSyntaxAfterCheck = true;
+
+    Frontend& frontend = getFrontend();
+    CheckResult first = frontend.check("game/B", options);
+    LUAU_REQUIRE_ERROR_COUNT(1, first);
+    REQUIRE(frontend.getSourceModule("game/A"));
+    REQUIRE(frontend.getSourceModule("game/B"));
+    CHECK(frontend.getSourceModule("game/A")->root == nullptr);
+    CHECK(frontend.getSourceModule("game/B")->root == nullptr);
+    CHECK(!frontend.isDirty("game/B"));
+    // The module lets go of the syntax's allocator as well, and its errors still describe themselves.
+    CHECK(frontend.moduleResolver.getModule("game/B")->allocator == nullptr);
+    CHECK(toString(first.errors[0]).find("string") != std::string::npos);
+
+    // Only B depends on A's new text; A is read again when it is checked, B when its dependency changed.
+    fileResolver.source["game/A"] = R"(
+        --!strict
+        return { value = "one" }
+    )";
+    frontend.markDirty("game/A");
+    CheckResult second = frontend.check("game/B", options);
+    LUAU_REQUIRE_NO_ERRORS(second);
+
+    // With full type graphs the tree is kept for whatever reads them.
+    options.retainFullTypeGraphs = true;
+    frontend.markDirty("game/B");
+    frontend.check("game/B", options);
+    CHECK(frontend.getSourceModule("game/B")->root != nullptr);
+}
+
+TEST_CASE_FIXTURE(FrontendFixture, "an_embedder_renders_errors_before_their_types_are_dropped")
+{
+    fileResolver.source["game/A"] = R"(
+        --!strict
+        local s: string = { x = 1 }
+        return {}
+    )";
+
+    std::vector<std::string> rendered;
+    FrontendOptions options;
+    options.retainFullTypeGraphs = false;
+    options.renderErrors = [&](const SourceModule& source, const ModulePtr& module)
+    {
+        for (const TypeError& error : module->errors)
+            rendered.push_back(toString(error));
+        return true;
+    };
+
+    CheckResult result = getFrontend().check("game/A", options);
+    REQUIRE(rendered.size() == 1);
+    CHECK(rendered[0].find("string") != std::string::npos);
+    // The module kept nothing of them, and so copied none of their types into its interface.
+    CHECK(result.errors.empty());
+    CHECK(getFrontend().moduleResolver.getModule("game/A")->errors.empty());
+
+    // Declining keeps the errors, with their types copied, as without the hook.
+    options.renderErrors = [](const SourceModule&, const ModulePtr&)
+    {
+        return false;
+    };
+    getFrontend().markDirty("game/A");
+    CheckResult kept = getFrontend().check("game/A", options);
+    LUAU_REQUIRE_ERROR_COUNT(1, kept);
+    CHECK_EQ(rendered[0], toString(kept.errors[0]));
+}
+
+TEST_CASE_FIXTURE(FrontendFixture, "a_parallel_build_keeps_only_text_until_each_module_is_checked")
+{
+    ScopedFastFlag sffs[] = {{FFlag::LuauPrefetchSourcesInParallel, true}, {FFlag::LuauDeferSyntaxOfCachedModules, true}};
+
+    fileResolver.source["game/A"] = R"(
+        --!strict
+        export type T = { x: number }
+        return { make = function(): T return { x = 1 } end }
+    )";
+    fileResolver.source["game/B"] = R"(
+        --!strict
+        local A = require(game.A)
+        local s: string = A.make().x
+        return {}
+    )";
+
+    std::vector<ModuleName> parsedBeforeChecking;
+    FrontendOptions options;
+    options.retainFullTypeGraphs = false;
+    options.releaseSyntaxAfterCheck = true;
+    options.customModuleCheck = [&](const SourceModule& source, const Module&)
+    {
+        // Each module is parsed for its own check; the other one is not, or no longer, a tree.
+        CHECK(source.root != nullptr);
+        for (const char* other : {"game/A", "game/B"})
+        {
+            if (source.name != other && getFrontend().getSourceModule(other)->root)
+                parsedBeforeChecking.push_back(other);
+        }
+    };
+    auto inline_ = [](std::vector<std::function<void()>> tasks)
+    {
+        for (std::function<void()>& task : tasks)
+            task();
+    };
+
+    Frontend& frontend = getFrontend();
+    frontend.queueModuleCheck("game/B");
+    frontend.checkQueuedModules(options, inline_);
+    std::optional<CheckResult> result = frontend.getCheckResult("game/B", true);
+    REQUIRE(result);
+    LUAU_REQUIRE_ERROR_COUNT(1, *result);
+    CHECK(parsedBeforeChecking.empty());
+    CHECK(frontend.getSourceModule("game/A")->root == nullptr);
+    CHECK(frontend.getSourceModule("game/B")->root == nullptr);
+}
+
+TEST_CASE_FIXTURE(FrontendFixture, "a_deferred_module_reads_its_text_again_when_reads_are_stable")
+{
+    ScopedFastFlag sffs[] = {{FFlag::LuauPrefetchSourcesInParallel, true}, {FFlag::LuauDeferSyntaxOfCachedModules, true}};
+
+    fileResolver.stableReads = true;
+    fileResolver.source["game/A"] = R"(
+        --!strict
+        export type T = { x: number }
+        return { make = function(): T return { x = 1 } end }
+    )";
+    fileResolver.source["game/B"] = R"(
+        --!strict
+        local A = require(game.A)
+        local s: string = A.make().x
+        return {}
+    )";
+
+    std::vector<ModuleName> keptText;
+    FrontendOptions options;
+    options.retainFullTypeGraphs = false;
+    options.releaseSyntaxAfterCheck = true;
+    options.customModuleCheck = [&](const SourceModule& source, const Module&)
+    {
+        CHECK(source.root != nullptr);
+        for (const char* other : {"game/A", "game/B"})
+        {
+            const SourceModule* waiting = getFrontend().getSourceModule(other);
+            if (source.name != other && waiting->deferredSyntax && !waiting->deferredSyntax->source.empty())
+                keptText.push_back(other);
+        }
+    };
+    auto inline_ = [](std::vector<std::function<void()>> tasks)
+    {
+        for (std::function<void()>& task : tasks)
+            task();
+    };
+
+    Frontend& frontend = getFrontend();
+    frontend.queueModuleCheck("game/B");
+    frontend.checkQueuedModules(options, inline_);
+    std::optional<CheckResult> result = frontend.getCheckResult("game/B", true);
+    REQUIRE(result);
+    LUAU_REQUIRE_ERROR_COUNT(1, *result);
+    CHECK(get<TypeMismatch>(result->errors[0]));
+    CHECK(keptText.empty());
+    CHECK(fileResolver.readCounts["game/A"] == 2);
+    CHECK(fileResolver.readCounts["game/B"] == 2);
 }
 
 TEST_SUITE_END();

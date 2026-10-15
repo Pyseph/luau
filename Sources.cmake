@@ -246,6 +246,7 @@ target_sources(Luau.Analysis PRIVATE
     Analysis/include/Luau/LValue.h
     Analysis/include/Luau/Metamethods.h
     Analysis/include/Luau/Module.h
+    Analysis/include/Luau/ModuleInterface.h
     Analysis/include/Luau/ModuleResolver.h
     Analysis/include/Luau/NonStrictTypeChecker.h
     Analysis/include/Luau/Normalize.h
@@ -335,6 +336,7 @@ target_sources(Luau.Analysis PRIVATE
     Analysis/src/Linter.cpp
     Analysis/src/LValue.cpp
     Analysis/src/Module.cpp
+    Analysis/src/ModuleInterface.cpp
     Analysis/src/NonStrictTypeChecker.cpp
     Analysis/src/Normalize.cpp
     Analysis/src/OverloadResolver.cpp
@@ -533,6 +535,7 @@ if(TARGET Luau.UnitTest)
         tests/Linter.test.cpp
         tests/LValue.test.cpp
         tests/Module.test.cpp
+        tests/ModuleInterface.test.cpp
         tests/NonstrictMode.test.cpp
         tests/NonStrictTypeChecker.test.cpp
         tests/Normalize.test.cpp

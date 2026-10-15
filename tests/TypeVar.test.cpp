@@ -481,4 +481,81 @@ TEST_CASE("type_ids_keep_their_members_past_the_linear_search_limit")
         CHECK(ids.contains(types[i]) == (i % 3 != 0));
 }
 
+TEST_CASE_FIXTURE(Fixture, "a_property_reads_like_optional_types_and_texts")
+{
+    TypeId number = getBuiltins()->numberType;
+    TypeId string = getBuiltins()->stringType;
+
+    Property readonly = Property::readonly(number);
+    CHECK(readonly.readTy);
+    CHECK(!readonly.writeTy);
+    CHECK(*readonly.readTy == number);
+    CHECK(readonly.readTy.value_or(string) == number);
+    CHECK(readonly.writeTy.value_or(string) == string);
+    CHECK(readonly.isReadOnly());
+
+    std::optional<TypeId> read = readonly.readTy;
+    std::optional<TypeId> write = readonly.writeTy;
+    CHECK(read == number);
+    CHECK(write == std::nullopt);
+
+    Property shared = Property::rw(number);
+    CHECK(shared.isShared());
+    shared.writeTy = string;
+    CHECK(!shared.isShared());
+    shared.makeShared();
+    CHECK(shared.writeTy == shared.readTy);
+    shared.writeTy.reset();
+    CHECK(shared.isReadOnly());
+
+    Property documented{number, /* deprecated */ true, "use 'other'", std::nullopt, {}, std::string("@luau/global/thing")};
+    CHECK(documented.deprecatedSuggestion);
+    CHECK(*documented.deprecatedSuggestion == "use 'other'");
+    CHECK(documented.documentationSymbol.value_or("") == "@luau/global/thing");
+
+    Property copied = documented;
+    *documented.documentationSymbol = "@luau/global/changed";
+    CHECK(*copied.documentationSymbol == "@luau/global/thing");
+    CHECK(copied.documentationSymbol != documented.documentationSymbol);
+
+    Property plain{number};
+    CHECK(!plain.deprecatedSuggestion);
+    CHECK(!plain.documentationSymbol);
+    std::optional<std::string> none = plain.documentationSymbol;
+    CHECK(none == std::nullopt);
+
+    plain.documentationSymbol = std::string{};
+    CHECK(plain.documentationSymbol);
+    CHECK(plain.documentationSymbol->empty());
+}
+
+TEST_CASE("tables_and_functions_share_the_name_of_the_module_that_defined_them")
+{
+    ModuleName name = "game/ReplicatedStorage/Modules/Shared/SomeLongModuleName";
+
+    TableType first;
+    first.definitionModuleName = name;
+    TableType second;
+    second.definitionModuleName = name;
+    CHECK(&first.definitionModuleName.str() == &second.definitionModuleName.str());
+    CHECK(first.definitionModuleName.str() == name);
+
+    TableType copied = first;
+    CHECK(&copied.definitionModuleName.str() == &first.definitionModuleName.str());
+
+    TableType other;
+    other.definitionModuleName = std::string{"game/Other"};
+    CHECK(other.definitionModuleName != first.definitionModuleName);
+
+    TableType none;
+    CHECK(none.definitionModuleName.empty());
+    CHECK(none.definitionModuleName.str().empty());
+
+    FunctionDefinition definition;
+    CHECK(!definition.definitionModuleName);
+    definition.definitionModuleName = name;
+    std::optional<ModuleName> read = definition.definitionModuleName;
+    CHECK(read == name);
+}
+
 TEST_SUITE_END();

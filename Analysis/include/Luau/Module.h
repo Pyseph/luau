@@ -25,6 +25,7 @@ void setLogLuau(LogLuauProc ll);
 void resetLogLuauProc();
 
 struct Module;
+struct ModuleInterfaceIndex;
 struct UserDefinedTypeFunctionResults;
 
 using ScopePtr = std::shared_ptr<struct Scope>;
@@ -52,6 +53,20 @@ struct SourceModule
 
     std::vector<HotComment> hotcomments;
     std::vector<Comment> commentLocations;
+
+    // Whether `root` has a top-level return. Set when the module is parsed, so it stays readable from other threads
+    // while this module's tree is given back or parsed again.
+    std::optional<bool> topLevelReturn;
+
+    // The text and options to parse the module from again: its tree was given back after its requires were traced,
+    // because a module cache expected to answer for it. Frontend::restoreSyntax parses it before anything reads it.
+    struct DeferredSyntax
+    {
+        // Empty when the file resolver's reads are stable: the text is read again instead.
+        std::string source;
+        ParseOptions options;
+    };
+    std::shared_ptr<const DeferredSyntax> deferredSyntax;
 
     SourceModule()
         : allocator(new Allocator)
@@ -87,6 +102,9 @@ struct Module
     std::string humanReadableName;
 
     TypeArena interfaceTypes;
+    // The checkers' copies of the types this module's errors mention, apart from its interface so that an embedder
+    // that has described the errors can let them go (FrontendOptions::renderErrors).
+    TypeArena errorTypes;
     // For modules in a require cycle, internalTypes is shared across all members
     // so that a single constraint solver pass can allocate and resolve types across the cycle.
     std::shared_ptr<TypeArena> internalTypes;
@@ -142,6 +160,10 @@ struct Module
 
     // Results of the user-defined type functions defined here, reused by every module that evaluates them
     std::shared_ptr<UserDefinedTypeFunctionResults> typeFunctionResults;
+
+    // The canonical numbering of this module's interface, set once it has been serialized or deserialized
+    // (Luau/ModuleInterface.h). Other modules' serialized interfaces refer to its types through it.
+    std::shared_ptr<const ModuleInterfaceIndex> interfaceIndex;
 
     std::unordered_map<Name, TypeId> declaredGlobals;
     ErrorVec errors;
